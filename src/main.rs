@@ -1,15 +1,41 @@
+mod picture;
+mod text;
+
+#[derive(clap::Parser)]
+#[command(version, about)]
+struct Args {
+    /// Refresh rate [ms]
+    #[arg(long, default_value = "1000")]
+    interval: u64,
+    /// Window width
+    #[arg(long, default_value = "800")]
+    width: u32,
+    /// Window height
+    #[arg(long, default_value = "480")]
+    height: u32,
+    /// Path representing background picture directory
+    #[arg(long, default_value = "pictures")]
+    path: String,
+    /// A time until shuffling background picture [s]
+    #[arg(long, default_value = "3600")]
+    pic_interval: u64,
+}
+
 fn main() {
-    let interval = std::time::Duration::from_secs(1);
+    use clap::Parser;
+    let args = Args::parse();
+
+    let interval = std::time::Duration::from_millis(args.interval);
+    let mut instance = std::time::Instant::now();
 
     let event_loop = winit::event_loop::EventLoopBuilder::new().build();
     let window = winit::window::WindowBuilder::new()
-        .with_inner_size(winit::dpi::PhysicalSize::new(800, 480))
+        .with_inner_size(winit::dpi::PhysicalSize::new(args.width, args.height))
         .build(&event_loop)
         .unwrap();
     let mut renderer = pollster::block_on(Renderer::new(window));
-    renderer.set_picture(
-        image::load_from_memory(include_bytes!("../assets/textures/main.png")).unwrap(),
-    );
+    let mut rng = rand::thread_rng();
+    renderer.set_picture(choise_pic(&args.path, &mut rng));
 
     use winit::event::Event;
     use winit::event::StartCause;
@@ -19,6 +45,10 @@ fn main() {
             control_flow.set_wait_timeout(interval);
         }
         Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
+            if args.pic_interval < instance.elapsed().as_secs() {
+                renderer.set_picture(choise_pic(&args.path, &mut rng));
+                instance = std::time::Instant::now();
+            }
             renderer.request_redraw();
             control_flow.set_wait_timeout(interval);
         }
@@ -123,4 +153,19 @@ impl Renderer {
     fn match_window(&self, window_id: winit::window::WindowId) -> bool {
         self.window.id() == window_id
     }
+}
+
+fn choise_pic(path: &str, rng: &mut impl rand::Rng) -> image::DynamicImage {
+    use rand::seq::IteratorRandom;
+
+    let entry = std::fs::read_dir(path)
+        .unwrap()
+        .choose(rng)
+        .unwrap()
+        .unwrap();
+
+    let file = std::fs::File::open(entry.path()).unwrap();
+    let reader = std::io::BufReader::new(file);
+
+    image::load(reader, image::ImageFormat::Png).unwrap()
 }

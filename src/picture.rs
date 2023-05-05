@@ -11,10 +11,10 @@ pub struct PicturePipeline {
 impl PicturePipeline {
     #[rustfmt::skip]
     const VERTICES: &[Vertex] = &[
-        Vertex { position: [-1.0, -1.0, 0.0], texcoord: [0.0, 0.0] },
-        Vertex { position: [1.0, -1.0, 0.0], texcoord: [1.0, 0.0] },
-        Vertex { position: [1.0, 1.0, 0.0], texcoord: [1.0, 1.0] },
-        Vertex { position: [-1.0, 1.0, 0.0], texcoord: [0.0, 1.0] },
+        Vertex { position: [-1.0, -1.0, 0.0], texcoord: [0.0, 1.0] },
+        Vertex { position: [1.0, -1.0, 0.0], texcoord: [1.0, 1.0] },
+        Vertex { position: [1.0, 1.0, 0.0], texcoord: [1.0, 0.0] },
+        Vertex { position: [-1.0, 1.0, 0.0], texcoord: [0.0, 0.0] },
     ];
     const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
 
@@ -145,24 +145,30 @@ impl PicturePipeline {
         }
     }
 
-    pub fn set_image(&mut self, queue: &wgpu::Queue, img: image::DynamicImage) {
-        if img.width() == self.texture_size.width && img.height() == self.texture_size.height {
-            queue.write_texture(
-                wgpu::ImageCopyTextureBase {
-                    texture: &self.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &img.to_rgba8(),
-                wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * self.texture_size.width),
-                    rows_per_image: Some(self.texture_size.height),
-                },
-                self.texture_size,
+    pub fn set_image(&mut self, queue: &wgpu::Queue, mut img: image::DynamicImage) {
+        if img.width() != self.texture_size.width || img.height() != self.texture_size.height {
+            img = img.resize_to_fill(
+                self.texture_size.width,
+                self.texture_size.height,
+                image::imageops::FilterType::Nearest,
             );
         }
+
+        queue.write_texture(
+            wgpu::ImageCopyTextureBase {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &img.to_rgba8(),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * self.texture_size.width),
+                rows_per_image: Some(self.texture_size.height),
+            },
+            self.texture_size,
+        );
     }
 
     pub fn draw(&self, device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView) {
