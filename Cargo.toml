@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-clap = { version = "4", default-features = false, features = ["std", "derive"] }
+clap = { version = "4", default-features = false, features = ["std", "help", "usage", "derive"] }
 env_logger = { version = "0.10", default-features = false }
 image = { version = "0.24", default-features = false, features = ["png"] }
 log = "0.4"
