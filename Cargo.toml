@@ -5,11 +5,13 @@ edition = "2021"
 
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
-clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", default-features = false, features = ["std", "derive"] }
+env_logger = { version = "0.10", default-features = false }
 image = { version = "0.24", default-features = false, features = ["png"] }
-chrono = "0.4"
+log = "0.4"
 pollster = "0.3"
-rand = "0.8"
+rand = { version = "0.8", default-features = false }
 wgpu = "0.16"
 wgpu_glyph = "0.20"
-winit = "0.28"
+winit = { version = "0.28", default-features = false, features = ["x11", "wayland"] }

@@ -22,12 +22,12 @@ struct Args {
 }
 
 fn main() {
+    env_logger::init();
+
     use clap::Parser;
     let args = Args::parse();
 
-    let interval = std::time::Duration::from_millis(args.interval);
-    let mut instance = std::time::Instant::now();
-
+    log::debug!("start application");
     let event_loop = winit::event_loop::EventLoopBuilder::new().build();
     let window = winit::window::WindowBuilder::new()
         .with_inner_size(winit::dpi::PhysicalSize::new(args.width, args.height))
@@ -37,6 +37,10 @@ fn main() {
     let mut rng = rand::thread_rng();
     renderer.set_picture(choise_pic(&args.path, &mut rng));
 
+    let interval = std::time::Duration::from_millis(args.interval);
+    let mut instance = std::time::Instant::now();
+
+    log::debug!("start event loop");
     use winit::event::Event;
     use winit::event::StartCause;
     use winit::event::WindowEvent;
@@ -85,8 +89,12 @@ struct Renderer {
 
 impl Renderer {
     async fn new(window: winit::window::Window) -> Self {
+        log::debug!("create renderering resource");
+        log::debug!("create instance");
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+        log::debug!("create surface");
         let surface = unsafe { instance.create_surface(&window) }.unwrap();
+        log::debug!("create adapter");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::LowPower,
@@ -95,6 +103,8 @@ impl Renderer {
             })
             .await
             .unwrap();
+        log::debug!("{:?}", adapter.get_info());
+        log::debug!("create device");
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default(), None)
             .await
@@ -103,8 +113,10 @@ impl Renderer {
         let config = surface
             .get_default_config(&adapter, inner_size.width, inner_size.height)
             .unwrap();
+        log::debug!("configure surface");
         surface.configure(&device, &config);
 
+        log::debug!("create pipelines");
         let picture_pipeline = picture::PicturePipeline::new(&device, config.format, 800, 480);
         let text_pipeline =
             text::TextPipeline::new(&device, config.format, config.width, config.height);
@@ -158,6 +170,7 @@ impl Renderer {
 fn choise_pic(path: &str, rng: &mut impl rand::Rng) -> image::DynamicImage {
     use rand::seq::IteratorRandom;
 
+    log::debug!("choise random picture");
     let entry = std::fs::read_dir(path)
         .unwrap()
         .choose(rng)
