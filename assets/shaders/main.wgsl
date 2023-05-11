@@ -1,8 +1,3 @@
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) texcoords: vec2<f32>,
-};
-
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
 		@location(0) texcoords: vec2<f32>,
@@ -10,11 +5,21 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(
-    model: VertexInput,
+    @builtin(vertex_index) in_vertex_index: u32,
 ) -> VertexOutput {
     var out: VertexOutput;
-		out.texcoords = model.texcoords;
-    out.clip_position = vec4<f32>(model.position, 1.0);
+    if in_vertex_index == u32(0) {
+        out.clip_position = vec4<f32>(-1.0, 1.0, 0.0, 1.0);
+        out.texcoords = vec2<f32>(0.0, 0.0);
+    }
+		if in_vertex_index == u32(1) {
+        out.clip_position = vec4<f32>(-1.0, -3.0, 0.0, 1.0);
+        out.texcoords = vec2<f32>(0.0, 2.0);
+		}
+    if in_vertex_index == u32(2) {
+        out.clip_position = vec4<f32>(3.0, 1.0, 0.0, 1.0);
+        out.texcoords = vec2<f32>(2.0, 0.0);
+    }
     return out;
 }
 

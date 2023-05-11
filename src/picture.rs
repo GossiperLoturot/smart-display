@@ -1,42 +1,17 @@
 pub struct PicturePipeline {
     texture_size: wgpu::Extent3d,
     texture: wgpu::Texture,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    nums_indices: u32,
     bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
 }
 
 impl PicturePipeline {
-    #[rustfmt::skip]
-    const VERTICES: &[Vertex] = &[
-        Vertex { position: [-1.0, -1.0, 0.0], texcoord: [0.0, 1.0] },
-        Vertex { position: [1.0, -1.0, 0.0], texcoord: [1.0, 1.0] },
-        Vertex { position: [1.0, 1.0, 0.0], texcoord: [1.0, 0.0] },
-        Vertex { position: [-1.0, 1.0, 0.0], texcoord: [0.0, 0.0] },
-    ];
-    const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
-
     pub fn new(
         device: &wgpu::Device,
         target_format: wgpu::TextureFormat,
         picture_width: u32,
         picture_height: u32,
     ) -> Self {
-        use wgpu::util::DeviceExt;
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(Self::VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(Self::INDICES),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        let nums_indices = Self::INDICES.len() as u32;
-
         let texture_size = wgpu::Extent3d {
             width: picture_width,
             height: picture_height,
@@ -105,7 +80,7 @@ impl PicturePipeline {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[Vertex::layout()],
+                buffers: &[],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -137,9 +112,6 @@ impl PicturePipeline {
         Self {
             texture_size,
             texture,
-            vertex_buffer,
-            index_buffer,
-            nums_indices,
             bind_group,
             pipeline,
         }
@@ -186,32 +158,10 @@ impl PicturePipeline {
             depth_stencil_attachment: None,
         });
         pass.set_pipeline(&self.pipeline);
-        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.draw_indexed(0..self.nums_indices, 0, 0..1);
+        pass.draw(0..3, 0..1);
         drop(pass);
 
         queue.submit([encoder.finish()]);
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    position: [f32; 3],
-    texcoord: [f32; 2],
-}
-
-impl Vertex {
-    const ATTRIBUTES: &[wgpu::VertexAttribute] =
-        &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2];
-
-    fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: Self::ATTRIBUTES,
-        }
     }
 }
