@@ -6,19 +6,25 @@ mod text;
 struct Args {
     /// Refresh rate [ms]
     #[arg(long, default_value = "1000")]
-    interval: u64,
+    refresh_rate: u64,
     /// Window width
     #[arg(long, default_value = "800")]
     width: u32,
     /// Window height
     #[arg(long, default_value = "480")]
     height: u32,
+    /// Picture width
+    #[arg(long, default_value = "800")]
+    picture_width: u32,
+    /// Picture height
+    #[arg(long, default_value = "480")]
+    picture_height: u32,
     /// Path representing background picture directory
     #[arg(long, default_value = "pictures")]
-    path: String,
+    picture_path: String,
     /// A time until shuffling background picture [s]
     #[arg(long, default_value = "3600")]
-    pic_interval: u64,
+    picture_interval: u64,
 }
 
 fn main() {
@@ -33,11 +39,16 @@ fn main() {
         .with_inner_size(winit::dpi::PhysicalSize::new(args.width, args.height))
         .build(&event_loop)
         .unwrap();
-    let mut renderer = pollster::block_on(Renderer::new(window));
+    let mut renderer = pollster::block_on(Renderer::new(
+        window,
+        args.picture_width,
+        args.picture_height,
+    ));
     let mut rng = rand::thread_rng();
-    renderer.set_picture(choise_pic(&args.path, &mut rng));
+    renderer.set_picture(choise_picture(&args.picture_path, &mut rng));
 
-    let interval = std::time::Duration::from_millis(args.interval);
+    let interval = std::time::Duration::from_millis(args.refresh_rate);
+    let picture_interval = std::time::Duration::from_secs(args.picture_interval);
     let mut instance = std::time::Instant::now();
 
     log::debug!("start event loop");
@@ -49,8 +60,8 @@ fn main() {
             control_flow.set_wait_timeout(interval);
         }
         Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
-            if args.pic_interval < instance.elapsed().as_secs() {
-                renderer.set_picture(choise_pic(&args.path, &mut rng));
+            if picture_interval < instance.elapsed() {
+                renderer.set_picture(choise_picture(&args.picture_path, &mut rng));
                 instance = std::time::Instant::now();
             }
             renderer.request_redraw();
@@ -88,7 +99,7 @@ struct Renderer {
 }
 
 impl Renderer {
-    async fn new(window: winit::window::Window) -> Self {
+    async fn new(window: winit::window::Window, picture_width: u32, picture_height: u32) -> Self {
         log::debug!("create renderering resource");
         log::debug!("create instance");
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
@@ -117,7 +128,8 @@ impl Renderer {
         surface.configure(&device, &config);
 
         log::debug!("create pipelines");
-        let picture_pipeline = picture::PicturePipeline::new(&device, config.format, 800, 480);
+        let picture_pipeline =
+            picture::PicturePipeline::new(&device, config.format, picture_width, picture_height);
         let text_pipeline =
             text::TextPipeline::new(&device, config.format, config.width, config.height);
 
@@ -149,7 +161,7 @@ impl Renderer {
     }
 
     fn set_picture(&mut self, img: image::DynamicImage) {
-        self.picture_pipeline.set_image(&self.queue, img);
+        self.picture_pipeline.set_picture(&self.queue, img);
     }
 
     fn resize(&mut self, new_inner_size: winit::dpi::PhysicalSize<u32>) {
@@ -167,14 +179,19 @@ impl Renderer {
     }
 }
 
-fn choise_pic(path: &str, rng: &mut impl rand::Rng) -> image::DynamicImage {
+fn choise_picture(path: &str, rng: &mut impl rand::Rng) -> image::DynamicImage {
     use rand::seq::IteratorRandom;
 
     log::debug!("choise random picture");
     let entry = std::fs::read_dir(path)
         .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.file_name().to_str().map_or(false, |name| {
+                !name.starts_with(".") && name.ends_with(".png")
+            })
+        })
         .choose(rng)
-        .unwrap()
         .unwrap();
 
     let file = std::fs::File::open(entry.path()).unwrap();

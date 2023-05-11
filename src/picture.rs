@@ -21,8 +21,8 @@ impl PicturePipeline {
     pub fn new(
         device: &wgpu::Device,
         target_format: wgpu::TextureFormat,
-        image_width: u32,
-        image_height: u32,
+        picture_width: u32,
+        picture_height: u32,
     ) -> Self {
         use wgpu::util::DeviceExt;
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -38,8 +38,8 @@ impl PicturePipeline {
         let nums_indices = Self::INDICES.len() as u32;
 
         let texture_size = wgpu::Extent3d {
-            width: image_width,
-            height: image_height,
+            width: picture_width,
+            height: picture_height,
             depth_or_array_layers: 1,
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -145,9 +145,11 @@ impl PicturePipeline {
         }
     }
 
-    pub fn set_image(&mut self, queue: &wgpu::Queue, mut img: image::DynamicImage) {
-        if img.width() != self.texture_size.width || img.height() != self.texture_size.height {
-            img = img.resize_to_fill(
+    pub fn set_picture(&mut self, queue: &wgpu::Queue, mut picture: image::DynamicImage) {
+        if picture.width() != self.texture_size.width
+            || picture.height() != self.texture_size.height
+        {
+            picture = picture.resize_to_fill(
                 self.texture_size.width,
                 self.texture_size.height,
                 image::imageops::FilterType::Nearest,
@@ -161,7 +163,7 @@ impl PicturePipeline {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &img.to_rgba8(),
+            &picture.to_rgba8(),
             wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * self.texture_size.width),
