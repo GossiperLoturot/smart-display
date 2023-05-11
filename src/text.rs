@@ -33,8 +33,13 @@ impl TextPipeline {
         self.target_height = target_height;
     }
 
-    pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView) {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    pub fn draw(
+        &mut self,
+        device: &wgpu::Device,
+        view: &wgpu::TextureView,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        self.staging_belt.recall();
 
         let utc = chrono::Local::now();
         let date_text = utc.format("%Y/%m/%d %a\n").to_string();
@@ -65,7 +70,7 @@ impl TextPipeline {
             .draw_queued(
                 device,
                 &mut self.staging_belt,
-                &mut encoder,
+                encoder,
                 view,
                 self.target_width,
                 self.target_height,
@@ -73,7 +78,5 @@ impl TextPipeline {
             .unwrap();
 
         self.staging_belt.finish();
-        queue.submit([encoder.finish()]);
-        self.staging_belt.recall();
     }
 }

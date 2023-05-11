@@ -153,10 +153,15 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
 
-        self.picture_pipeline.draw(&self.device, &self.queue, &view);
-        self.text_pipeline.draw(&self.device, &self.queue, &view);
+        self.picture_pipeline
+            .draw(&self.device, &view, &mut encoder);
+        self.text_pipeline.draw(&self.device, &view, &mut encoder);
 
+        self.queue.submit([encoder.finish()]);
         frame.present();
     }
 

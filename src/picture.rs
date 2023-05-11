@@ -145,9 +145,12 @@ impl PicturePipeline {
         );
     }
 
-    pub fn draw(&self, device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView) {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-
+    pub fn draw(
+        &self,
+        _device: &wgpu::Device,
+        view: &wgpu::TextureView,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -160,8 +163,5 @@ impl PicturePipeline {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.draw(0..3, 0..1);
-        drop(pass);
-
-        queue.submit([encoder.finish()]);
     }
 }
