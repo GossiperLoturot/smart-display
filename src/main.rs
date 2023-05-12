@@ -193,7 +193,7 @@ fn choise_picture(path: &str, rng: &mut impl rand::Rng) -> image::DynamicImage {
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
             entry.file_name().to_str().map_or(false, |name| {
-                !name.starts_with(".") && name.ends_with(".png")
+                !name.starts_with('.') && name.ends_with(".png")
             })
         })
         .choose(rng)

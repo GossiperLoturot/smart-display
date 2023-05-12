@@ -1,5 +1,4 @@
 pub struct PicturePipeline {
-    texture_size: wgpu::Extent3d,
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
@@ -12,14 +11,13 @@ impl PicturePipeline {
         picture_width: u32,
         picture_height: u32,
     ) -> Self {
-        let texture_size = wgpu::Extent3d {
-            width: picture_width,
-            height: picture_height,
-            depth_or_array_layers: 1,
-        };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
-            size: texture_size,
+            size: wgpu::Extent3d {
+                width: picture_width,
+                height: picture_height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -110,7 +108,6 @@ impl PicturePipeline {
         });
 
         Self {
-            texture_size,
             texture,
             bind_group,
             pipeline,
@@ -118,30 +115,25 @@ impl PicturePipeline {
     }
 
     pub fn set_picture(&mut self, queue: &wgpu::Queue, mut picture: image::DynamicImage) {
-        if picture.width() != self.texture_size.width
-            || picture.height() != self.texture_size.height
-        {
+        let texture_size = self.texture.size();
+
+        if picture.width() != texture_size.width || picture.height() != texture_size.height {
             picture = picture.resize_to_fill(
-                self.texture_size.width,
-                self.texture_size.height,
+                texture_size.width,
+                texture_size.height,
                 image::imageops::FilterType::Nearest,
             );
         }
 
         queue.write_texture(
-            wgpu::ImageCopyTextureBase {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
+            self.texture.as_image_copy(),
             &picture.to_rgba8(),
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(4 * self.texture_size.width),
-                rows_per_image: Some(self.texture_size.height),
+                bytes_per_row: Some(4 * texture_size.width),
+                rows_per_image: Some(texture_size.height),
             },
-            self.texture_size,
+            texture_size,
         );
     }
 
