@@ -114,20 +114,12 @@ impl PicturePipeline {
         }
     }
 
-    pub fn set_picture(&mut self, queue: &wgpu::Queue, mut picture: image::DynamicImage) {
+    pub fn set_picture(&mut self, queue: &wgpu::Queue, data: &[u8]) {
         let texture_size = self.texture.size();
-
-        if picture.width() != texture_size.width || picture.height() != texture_size.height {
-            picture = picture.resize_to_fill(
-                texture_size.width,
-                texture_size.height,
-                image::imageops::FilterType::Nearest,
-            );
-        }
 
         queue.write_texture(
             self.texture.as_image_copy(),
-            &picture.to_rgba8(),
+            data,
             wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * texture_size.width),

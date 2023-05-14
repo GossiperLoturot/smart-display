@@ -4,9 +4,9 @@ mod text;
 #[derive(clap::Parser)]
 #[command(version, about)]
 struct Args {
-    /// Refresh rate [ms]
+    /// Update interval [ms]
     #[arg(long, default_value = "1000")]
-    refresh_rate: u64,
+    update_interval: u64,
     /// Window width
     #[arg(long, default_value = "800")]
     width: u32,
@@ -34,6 +34,7 @@ fn main() {
     let args = Args::parse();
 
     log::debug!("start application");
+    let update_interval = std::time::Duration::from_millis(args.update_interval);
     let event_loop = winit::event_loop::EventLoopBuilder::new().build();
     let window = winit::window::WindowBuilder::new()
         .with_inner_size(winit::dpi::PhysicalSize::new(args.width, args.height))
@@ -44,12 +45,13 @@ fn main() {
         args.picture_width,
         args.picture_height,
     ));
-    let mut rng = rand::thread_rng();
-    renderer.set_picture(choise_picture(&args.picture_path, &mut rng));
-
-    let interval = std::time::Duration::from_millis(args.refresh_rate);
     let picture_interval = std::time::Duration::from_secs(args.picture_interval);
-    let mut instance = std::time::Instant::now();
+    let mut picture_interval_instance = std::time::Instant::now();
+    let pictures = load_pictures(&args.picture_path, args.picture_width, args.picture_height);
+
+    use rand::seq::SliceRandom;
+    let mut rng = rand::thread_rng();
+    renderer.set_picture(pictures.choose(&mut rng).unwrap());
 
     log::debug!("start event loop");
     use winit::event::Event;
@@ -57,17 +59,17 @@ fn main() {
     use winit::event::WindowEvent;
     event_loop.run(move |event, _, control_flow| match event {
         Event::NewEvents(StartCause::Init) => {
-            control_flow.set_wait_timeout(interval);
+            control_flow.set_wait_timeout(update_interval);
         }
         Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
-            if picture_interval < instance.elapsed() {
-                renderer.set_picture(choise_picture(&args.picture_path, &mut rng));
-                instance = std::time::Instant::now();
-            }
             renderer.request_redraw();
-            control_flow.set_wait_timeout(interval);
+            control_flow.set_wait_timeout(update_interval);
         }
         Event::RedrawRequested(window_id) if renderer.match_window(window_id) => {
+            if picture_interval < picture_interval_instance.elapsed() {
+                renderer.set_picture(pictures.choose(&mut rng).unwrap());
+                picture_interval_instance = std::time::Instant::now();
+            }
             renderer.draw();
         }
         Event::WindowEvent { window_id, event } if renderer.match_window(window_id) => {
@@ -165,8 +167,8 @@ impl Renderer {
         frame.present();
     }
 
-    fn set_picture(&mut self, img: image::DynamicImage) {
-        self.picture_pipeline.set_picture(&self.queue, img);
+    fn set_picture(&mut self, data: &[u8]) {
+        self.picture_pipeline.set_picture(&self.queue, data);
     }
 
     fn resize(&mut self, new_inner_size: winit::dpi::PhysicalSize<u32>) {
@@ -184,23 +186,22 @@ impl Renderer {
     }
 }
 
-fn choise_picture(path: &str, rng: &mut impl rand::Rng) -> image::DynamicImage {
-    use rand::seq::IteratorRandom;
-
-    log::debug!("choise random picture");
-    let entry = std::fs::read_dir(path)
+fn load_pictures(path: &str, width: u32, height: u32) -> Vec<Vec<u8>> {
+    log::debug!("load pictures");
+    std::fs::read_dir(path)
         .unwrap()
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
-            entry.file_name().to_str().map_or(false, |name| {
-                !name.starts_with('.') && name.ends_with(".png")
-            })
+            entry
+                .file_name()
+                .to_str()
+                .map_or(false, |name| !name.starts_with('.'))
         })
-        .choose(rng)
-        .unwrap();
-
-    let file = std::fs::File::open(entry.path()).unwrap();
-    let reader = std::io::BufReader::new(file);
-
-    image::load(reader, image::ImageFormat::Png).unwrap()
+        .filter_map(|entry| image::open(entry.path()).ok())
+        .map(|img| {
+            img.resize_to_fill(width, height, image::imageops::Lanczos3)
+                .to_rgba8()
+                .to_vec()
+        })
+        .collect()
 }
