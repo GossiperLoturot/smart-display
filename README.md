@@ -1,16 +1,9 @@
-![GitHub](https://img.shields.io/github/license/GossiperLoturot/clock-app)
+![GitHub](https://img.shields.io/github/license/GossiperLoturot/smart-display)
 
-# clock-app
+# smart-display
 
-![demo](https://raw.githubusercontent.com/GossiperLoturot/clock-app/main/demo.png)
+This application shows information such as date and time.
 
-An application that displays date and time written by Rust-lang.
+## Usages
 
-## Installation
-
-Download this repository and run `cargo build --release` to build.
-
-### Dependencies
-
-This application use winit and wgpu for window management and graphics.
-if the application causes graphics problems, check [winit](https://github.com/rust-windowing/winit) and [wgpu](https://github.com/gfx-rs/wgpu) page.
+Clone this repository and run `npm run build` and `npm run start` to start the application.
