@@ -1,9 +1,10 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useState, ReactNode } from "react";
-import { Config, ConfigScheme } from "./config/scheme";
-import styles from "./component.module.css";
 import { format } from "date-fns";
+import { Polling } from "./api/scheme";
+import styles from "./component.module.css";
 
 type ClockState = {
   date: string;
@@ -11,7 +12,7 @@ type ClockState = {
   meta: string;
 };
 
-export function Clock(): ReactNode {
+export function ClockBlock(): ReactNode {
   const [state, setState] = useState<ClockState | undefined>();
 
   useEffect(() => {
@@ -46,21 +47,24 @@ export function Clock(): ReactNode {
 }
 
 type BackgroundState = {
-  url: string;
+  imageUrl: string;
 };
 
-export function Background(): ReactNode {
+export function BackgroundBlock(): ReactNode {
   const [state, setState] = useState<BackgroundState | undefined>();
 
   useEffect(() => {
-    fetchConfig()
-      .then((config) => {
-        console.info("successful to fetch config");
-        setState({ url: config.entries[1].imageUrl });
-      })
-      .catch((reason) => {
-        throw reason;
-      });
+    const handle = setInterval(() => {
+      fetchPolling()
+        .then((polling) => {
+          console.info("successful to fetch polling");
+          setState({ imageUrl: polling.imageUrl });
+        })
+        .catch((reason) => {
+          throw reason;
+        });
+    }, 1000);
+    return () => clearInterval(handle);
   }, []);
 
   if (!state) {
@@ -72,17 +76,17 @@ export function Background(): ReactNode {
   }
 
   return (
-    <img
-      src={state.url}
+    <Image
+      src={state.imageUrl}
       alt="background"
       className={styles["background-picture"]}
+      fill={true}
     />
   );
 }
 
-async function fetchConfig(): Promise<Config> {
-  const res = await fetch("/config/api");
+async function fetchPolling(): Promise<Polling> {
+  const res = await fetch("/api");
   const json = await res.json();
-  const config = ConfigScheme.parse(json) as Config;
-  return config;
+  return json as Polling;
 }

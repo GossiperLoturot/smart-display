@@ -1,7 +1,7 @@
 "use client";
 
 import { Dispatch, ReactNode, useEffect, useReducer } from "react";
-import { Config, ConfigEntry, ConfigScheme } from "./scheme";
+import { Config, ConfigEntry } from "../api/scheme";
 
 type ConfigAction =
   | { type: "addConfigEntry"; index: number }
@@ -18,7 +18,10 @@ function configReducer(
       if (!config) return undefined;
       const newConfig = { ...config, entries: [...config.entries] };
       if (0 <= dispatch.index && dispatch.index <= newConfig.entries.length) {
-        newConfig.entries.splice(dispatch.index, 0, new ConfigEntry());
+        newConfig.entries.splice(dispatch.index, 0, {
+          imageUrl: "",
+          durationSecs: 60,
+        });
       }
       return newConfig;
     }
@@ -150,15 +153,13 @@ function ConfigEntryForm({
 }
 
 async function fetchConfig(): Promise<Config> {
-  const res = await fetch("/config/api");
+  const res = await fetch("/api/config");
   const json = await res.json();
-  const config = ConfigScheme.parse(json) as Config;
-  return config;
+  return json as Config;
 }
 
 async function submitConfig(config: Config): Promise<void> {
-  ConfigScheme.parse(config);
-  await fetch("/config/api", {
+  await fetch("/api/config", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
