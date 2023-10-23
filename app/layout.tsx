@@ -1,14 +1,17 @@
 import type { Metadata } from "next";
-import "./globals.css";
+import { Noto_Sans } from "next/font/google";
+import { ReactNode } from "react";
+
+const font = Noto_Sans({ weight: "400", subsets: [] });
 
 export const metadata: Metadata = { title: "smart-display" };
 
-type RootLayoutProps = { children: React.ReactNode };
+export type RootLayoutProps = { children: ReactNode };
 
-export default function RootLayout(props: RootLayoutProps) {
+export default function RootLayout(props: RootLayoutProps): ReactNode {
   return (
     <html lang="en">
-      <body>{props.children}</body>
+      <body className={font.className}>{props.children}</body>
     </html>
   );
 }

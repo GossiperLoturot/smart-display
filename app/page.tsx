@@ -1,12 +1,11 @@
-import Link from "next/link";
-import { Background, Clock } from "./component";
+import { Clock, Background } from "./component";
+import { ReactNode } from "react";
 
-export default function Home() {
+export default function Home(): ReactNode {
   return (
     <main>
       <Clock />
       <Background />
-      <Link href="/config">config</Link>
     </main>
   );
 }

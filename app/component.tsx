@@ -1,40 +1,88 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, ReactNode } from "react";
 import { Config, ConfigScheme } from "./config/scheme";
-import Image from "next/image";
+import styles from "./component.module.css";
+import { format } from "date-fns";
 
-export function Clock() {
-  const [clock, setClock] = useState<string | undefined>();
+type ClockState = {
+  date: string;
+  time: string;
+  meta: string;
+};
+
+export function Clock(): ReactNode {
+  const [state, setState] = useState<ClockState | undefined>();
 
   useEffect(() => {
-    setInterval(() => {
-      const date = new Date().toString();
-      setClock(date);
+    const handle = setInterval(() => {
+      const now = new Date();
+      setState({
+        date: format(now, "yyyy/MM/dd eeee, BBBB"),
+        time: format(now, "HH:mm:ss"),
+        meta: format(now, "QQQQ, OOOO"),
+      });
     }, 100);
+    return () => clearInterval(handle);
   }, []);
 
-  return <div>{clock}</div>;
-}
-
-export function Background() {
-  const [config, setConfig] = useState<Config | undefined>();
-  const [url, setUrl] = useState<string | undefined>();
-
-  useEffect(() => {
-    (async () => {
-      const res = await fetch("/config/api");
-      const json = await res.json();
-      const config = ConfigScheme.parse(json) as Config;
-      setConfig(config);
-
-      setUrl(config.entries[0].imageUrl);
-    })();
-  }, []);
-
-  if (url == undefined) {
-    return <div>loading</div>;
+  if (!state) {
+    return (
+      <div className={styles["clock-container"]}>
+        <div className={styles["clock"]}>Loading</div>
+      </div>
+    );
   }
 
-  return <Image src={url} alt="" width={720} height={420} />;
+  return (
+    <div className={styles["clock-container"]}>
+      <div className={styles["clock"]}>
+        <div className={styles["clock-date"]}>{state.date}</div>
+        <div className={styles["clock-time"]}>{state.time}</div>
+        <div className={styles["clock-meta"]}>{state.meta}</div>
+      </div>
+    </div>
+  );
+}
+
+type BackgroundState = {
+  url: string;
+};
+
+export function Background(): ReactNode {
+  const [state, setState] = useState<BackgroundState | undefined>();
+
+  useEffect(() => {
+    fetchConfig()
+      .then((config) => {
+        console.info("successful to fetch config");
+        setState({ url: config.entries[1].imageUrl });
+      })
+      .catch((reason) => {
+        throw reason;
+      });
+  }, []);
+
+  if (!state) {
+    return (
+      <div className={styles["background-container"]}>
+        <div className={styles["background"]}>Loading</div>
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={state.url}
+      alt="background"
+      className={styles["background-picture"]}
+    />
+  );
+}
+
+async function fetchConfig(): Promise<Config> {
+  const res = await fetch("/config/api");
+  const json = await res.json();
+  const config = ConfigScheme.parse(json) as Config;
+  return config;
 }
