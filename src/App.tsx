@@ -8,6 +8,7 @@ import {
   createSignal,
 } from "solid-js";
 import { createStore } from "solid-js/store";
+import { HTTP_API, WS_API } from ".";
 import "./App.css";
 
 type Polling = {
@@ -31,7 +32,7 @@ export const HomePage = () => {
       setPolling(polling);
     };
 
-    const ws = new WebSocket("ws://localhost:3000/polling");
+    const ws = new WebSocket(`${WS_API}/polling`);
     ws.addEventListener("open", onOpen);
     ws.addEventListener("message", onMessage);
 
@@ -83,7 +84,7 @@ type PicPatchIn = { url?: string; durationSecs?: number };
 
 export const PicturePage = () => {
   const [picList, { refetch }] = createResource(async () => {
-    const response = await fetch("http://localhost:3000/pic");
+    const response = await fetch(`${HTTP_API}/pic`);
     const output: PicListOut = await response.json();
     return output;
   });
@@ -91,7 +92,7 @@ export const PicturePage = () => {
   const [patchForm, setPatchForm] = createStore({ durationSecs: "" });
 
   const onPush = async (input: PicPushIn) => {
-    await fetch("http://localhost:3000/pic", {
+    await fetch(`${HTTP_API}/pic`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
@@ -100,7 +101,7 @@ export const PicturePage = () => {
   };
 
   const onPop = async (input: PicPopIn) => {
-    await fetch("http://localhost:3000/pic", {
+    await fetch(`${HTTP_API}/pic`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
@@ -109,7 +110,7 @@ export const PicturePage = () => {
   };
 
   const onPatch = async (input: PicPatchIn) => {
-    await fetch("http://localhost:3000/pic", {
+    await fetch(`${HTTP_API}/pic`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),

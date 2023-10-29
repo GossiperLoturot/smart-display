@@ -6,18 +6,23 @@ use rand::prelude::*;
 use serde::*;
 use warp::Filter;
 
-const ADDR: [u8; 4] = [127, 0, 0, 1];
+const ADDR: [u8; 4] = [0, 0, 0, 0];
 const PORT: u16 = 3000;
 
 #[tokio::main]
 async fn main() {
     let app_state = read_app_state().await.unwrap_or_default();
     let app_state = std::sync::Arc::new(tokio::sync::Mutex::new(app_state));
-    let filter = polling(app_state.clone())
-        .or(pic_list(app_state.clone()))
-        .or(pic_patch(app_state.clone()))
-        .or(pic_push(app_state.clone()))
-        .or(pic_pop(app_state.clone()))
+    let filter = warp::path("api")
+        .and(
+            polling(app_state.clone())
+                .or(pic_list(app_state.clone()))
+                .or(pic_patch(app_state.clone()))
+                .or(pic_push(app_state.clone()))
+                .or(pic_pop(app_state.clone())),
+        )
+        .or(warp::fs::dir("dist"))
+        .or(warp::fs::file("dist/index.html"))
         .with(
             warp::cors()
                 .allow_any_origin()
