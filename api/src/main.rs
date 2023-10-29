@@ -6,9 +6,6 @@ use rand::prelude::*;
 use serde::*;
 use warp::Filter;
 
-const ADDR: [u8; 4] = [0, 0, 0, 0];
-const PORT: u16 = 3000;
-
 #[tokio::main]
 async fn main() {
     let app_state = read_app_state().await.unwrap_or_default();
@@ -21,22 +18,33 @@ async fn main() {
                 .or(pic_push(app_state.clone()))
                 .or(pic_pop(app_state.clone())),
         )
-        .or(warp::fs::dir("dist"))
-        .or(warp::fs::file("dist/index.html"))
-        .with(
-            warp::cors()
-                .allow_any_origin()
-                .allow_methods(["GET", "POST", "DELETE", "PATCH"])
-                .allow_headers(["Content-Type"]),
-        );
+        .or(dist())
+        .with(cors());
 
     tokio::spawn(async {
         app_loop(app_state).await;
     });
 
-    let addr = std::net::SocketAddr::from((ADDR, PORT));
+    let addr: std::net::SocketAddr = std::env::var("ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:3000".into())
+        .parse()
+        .unwrap();
     println!("Listening on {}", addr);
     warp::serve(filter).run(addr).await;
+}
+
+fn dist() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    let dist_dir = std::env::var("DIST_DIR").unwrap_or_else(|_| "dist".into());
+    let dist_file = std::env::var("DIST_FILE").unwrap_or_else(|_| format!("{dist_dir}/index.html"));
+    warp::fs::dir(dist_dir).or(warp::fs::file(dist_file))
+}
+
+fn cors() -> warp::cors::Cors {
+    warp::cors()
+        .allow_any_origin()
+        .allow_methods(["GET", "POST", "DELETE", "PATCH"])
+        .allow_headers(["Content-Type"])
+        .build()
 }
 
 type SharedAppState = std::sync::Arc<tokio::sync::Mutex<AppState>>;
@@ -217,9 +225,14 @@ fn pic_pop(
         .and_then(handle)
 }
 
-#[derive(Debug)]
 struct ErrorMessage {
     message: String,
+}
+
+impl std::fmt::Debug for ErrorMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 impl<E: std::error::Error> From<E> for ErrorMessage {
