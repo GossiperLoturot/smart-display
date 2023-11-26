@@ -2,11 +2,15 @@
 name = "smart-display"
 version = "0.1.0"
 edition = "2021"
+description = "A lightweight smart display"
+author = "Takumi Sugimoto <ts20030211@gmail.com>"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 rand = "0.8"
+reqwest = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
