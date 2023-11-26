@@ -3,7 +3,7 @@ name = "smart-display"
 version = "0.1.0"
 edition = "2021"
 description = "A lightweight smart display"
-author = "Takumi Sugimoto <ts20030211@gmail.com>"
+authors = ["Takumi Sugimoto <ts20030211@gmail.com>"]
 
 [dependencies]
 base64 = "0.21"

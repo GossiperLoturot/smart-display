@@ -50,6 +50,12 @@ mod args {
     pub type SafeArgs = std::sync::Arc<Args>;
 
     #[derive(clap::Parser)]
+    #[clap(
+        name = env!("CARGO_PKG_NAME"),
+        version = env!("CARGO_PKG_VERSION"),
+        author = env!("CARGO_PKG_AUTHORS"),
+        about = env!("CARGO_PKG_DESCRIPTION"),
+    )]
     pub struct Args {
         #[arg(long)]
         pub state_filepath: std::path::PathBuf,

@@ -8,7 +8,7 @@ import {
   createSignal,
 } from "solid-js";
 import { createStore } from "solid-js/store";
-import { HTTP_API, WS_API } from ".";
+import { mock } from "./mock";
 import "./App.css";
 
 type Polling = {
@@ -29,10 +29,10 @@ export const HomePage = () => {
 
     const onMessage = (event: MessageEvent<string>) => {
       const polling = JSON.parse(event.data);
-      setPolling(polling);
+      cacheImage(polling.url).then((url) => setPolling({ ...polling, url }));
     };
 
-    const ws = new WebSocket(`${WS_API}/polling`);
+    const ws = new WebSocket(`${mock.wsUrl}/polling`);
     ws.addEventListener("open", onOpen);
     ws.addEventListener("message", onMessage);
 
@@ -81,18 +81,25 @@ type PicListOut = { durationSecs: number; urls: string[]; url: string };
 type PicPushIn = { url: string };
 type PicPopIn = { url: string };
 type PicPatchIn = { url?: string; durationSecs?: number };
+type PicCacheIn = { url: string };
+type PicCacheOut = { id: string };
 
 export const PicturePage = () => {
   const [picList, { refetch }] = createResource(async () => {
-    const response = await fetch(`${HTTP_API}/pic`);
+    const response = await fetch(`${mock.apiUrl}/pic`);
     const output: PicListOut = await response.json();
+
+    output.url = await cacheImage(output.url);
+    for (let i = 0; i < output.urls.length; i++) {
+      output.urls[i] = await cacheImage(output.urls[i]);
+    }
     return output;
   });
   const [pushForm, setPushForm] = createStore({ url: "" });
   const [patchForm, setPatchForm] = createStore({ durationSecs: "" });
 
   const onPush = async (input: PicPushIn) => {
-    await fetch(`${HTTP_API}/pic`, {
+    await fetch(`${mock.apiUrl}/pic`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
@@ -101,7 +108,7 @@ export const PicturePage = () => {
   };
 
   const onPop = async (input: PicPopIn) => {
-    await fetch(`${HTTP_API}/pic`, {
+    await fetch(`${mock.apiUrl}/pic`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
@@ -110,7 +117,7 @@ export const PicturePage = () => {
   };
 
   const onPatch = async (input: PicPatchIn) => {
-    await fetch(`${HTTP_API}/pic`, {
+    await fetch(`${mock.apiUrl}/pic`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
@@ -222,3 +229,15 @@ export const PicturePage = () => {
     </Show>
   );
 };
+
+async function cacheImage(url: string): Promise<string> {
+  const input: PicCacheIn = { url };
+  const response = await fetch(`${mock.apiUrl}/pic_cache`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const output: PicCacheOut = await response.json();
+
+  return `${mock.cacheUrl}/${output.id}`;
+}
