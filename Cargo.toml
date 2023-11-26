@@ -6,6 +6,7 @@ description = "A lightweight smart display"
 author = "Takumi Sugimoto <ts20030211@gmail.com>"
 
 [dependencies]
+base64 = "0.21"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"

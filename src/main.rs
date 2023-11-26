@@ -1,21 +1,22 @@
-use std::collections::HashSet;
+use std::*;
 
-use chrono::prelude::*;
 use clap::Parser;
-use futures::prelude::*;
-use rand::prelude::*;
-use serde::*;
 use warp::Filter;
 
 #[tokio::main]
 async fn main() {
-    let args = Args::parse();
+    let args = args::Args::parse();
     let safe_args = std::sync::Arc::new(args);
 
-    let state = read_state(&safe_args.state_filepath)
+    let state = state::read_state(&safe_args.state_filepath)
         .await
         .unwrap_or_default();
     let safe_state = std::sync::Arc::new(tokio::sync::Mutex::new(state));
+
+    let cache = cache::read_cache(&safe_args.cache_filepath)
+        .await
+        .unwrap_or_default();
+    let safe_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
 
     let filter = warp::path("api")
         .and(
@@ -23,123 +24,152 @@ async fn main() {
                 .or(pic_list::handle(safe_state.clone()))
                 .or(pic_patch::handle(safe_args.clone(), safe_state.clone()))
                 .or(pic_push::handle(safe_args.clone(), safe_state.clone()))
-                .or(pic_pop::hanle(safe_args.clone(), safe_state.clone())),
+                .or(pic_pop::hanle(safe_args.clone(), safe_state.clone()))
+                .or(pic_cache::hanle(safe_args.clone(), safe_cache.clone())),
         )
-        .or(dist(
-            safe_args.dist_dirpath.clone(),
-            safe_args.dist_filepath.clone(),
-        ))
-        .with(cors());
+        .or(warp::path("cache").and(warp::fs::dir(safe_args.cache_dirpath.clone())))
+        .or(warp::fs::dir(safe_args.dist_dirpath.clone()))
+        .or(warp::fs::file(safe_args.dist_filepath.clone()))
+        .with(
+            warp::cors()
+                .allow_any_origin()
+                .allow_methods(["GET", "POST", "DELETE", "PATCH"])
+                .allow_headers(["Content-Type"])
+                .build(),
+        );
 
     tokio::spawn(async {
-        safe_state_loop(safe_state).await;
+        state::safe_state_loop(safe_state).await;
     });
 
     println!("listening on {}", safe_args.address);
     warp::serve(filter).run(safe_args.address).await;
 }
 
-fn dist(
-    dirpath: impl Into<std::path::PathBuf>,
-    filepath: impl Into<std::path::PathBuf>,
-) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-    warp::fs::dir(dirpath).or(warp::fs::file(filepath))
+mod args {
+    pub type SafeArgs = std::sync::Arc<Args>;
+
+    #[derive(clap::Parser)]
+    pub struct Args {
+        #[arg(long)]
+        pub state_filepath: std::path::PathBuf,
+        #[arg(long)]
+        pub dist_dirpath: std::path::PathBuf,
+        #[arg(long)]
+        pub dist_filepath: std::path::PathBuf,
+        #[arg(long)]
+        pub cache_dirpath: std::path::PathBuf,
+        #[arg(long)]
+        pub cache_filepath: std::path::PathBuf,
+        #[arg(long)]
+        pub address: std::net::SocketAddr,
+    }
 }
 
-fn cors() -> warp::cors::Cors {
-    warp::cors()
-        .allow_any_origin()
-        .allow_methods(["GET", "POST", "DELETE", "PATCH"])
-        .allow_headers(["Content-Type"])
-        .build()
-}
+mod state {
+    use rand::prelude::*;
 
-type SafeArgs = std::sync::Arc<Args>;
+    use crate::error::ErrorMessage;
 
-#[derive(Parser)]
-#[clap(
-    name = env!("CARGO_PKG_NAME"),
-    version = env!("CARGO_PKG_VERSION"),
-    author = env!("CARGO_PKG_AUTHORS"),
-    about = env!("CARGO_PKG_DESCRIPTION"),
-)]
-struct Args {
-    #[arg(long)]
-    state_filepath: std::path::PathBuf,
-    #[arg(long)]
-    dist_dirpath: std::path::PathBuf,
-    #[arg(long)]
-    dist_filepath: std::path::PathBuf,
-    #[arg(long)]
-    address: std::net::SocketAddr,
-}
+    pub type SafeState = std::sync::Arc<tokio::sync::Mutex<State>>;
 
-type SafeState = std::sync::Arc<tokio::sync::Mutex<State>>;
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct State {
+        pub duration_secs: f32,
+        pub urls: std::collections::HashSet<String>,
+        pub url: String,
+    }
 
-#[derive(Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct State {
-    duration_secs: f32,
-    urls: HashSet<String>,
-    url: String,
-}
+    pub async fn read_state(filepath: impl AsRef<std::path::Path>) -> Result<State, ErrorMessage> {
+        let buf = tokio::fs::read(filepath)
+            .await
+            .map_err(ErrorMessage::from)?;
+        serde_json::from_slice(&buf).map_err(ErrorMessage::from)
+    }
 
-async fn read_state(filepath: impl AsRef<std::path::Path>) -> Result<State, ErrorMessage> {
-    let buf = tokio::fs::read(filepath)
-        .await
-        .map_err(ErrorMessage::from)?;
-    serde_json::from_slice(&buf).map_err(ErrorMessage::from)
-}
+    pub async fn write_state(
+        filepath: impl AsRef<std::path::Path>,
+        state: &State,
+    ) -> Result<(), ErrorMessage> {
+        let buf = serde_json::to_vec(&state).map_err(ErrorMessage::from)?;
+        tokio::fs::write(filepath, buf)
+            .await
+            .map_err(ErrorMessage::from)
+    }
 
-async fn write_state(
-    filepath: impl AsRef<std::path::Path>,
-    state: &State,
-) -> Result<(), ErrorMessage> {
-    let buf = serde_json::to_vec(&state).map_err(ErrorMessage::from)?;
-    tokio::fs::write(filepath, buf)
-        .await
-        .map_err(ErrorMessage::from)
-}
+    pub async fn safe_state_loop(safe_state: SafeState) {
+        let mut rng = StdRng::from_entropy();
 
-async fn safe_state_loop(safe_state: SafeState) {
-    let mut rng = StdRng::from_entropy();
+        loop {
+            let mut state = safe_state.lock().await;
 
-    loop {
-        let mut state = safe_state.lock().await;
+            if let Some(url) = state.urls.iter().choose(&mut rng) {
+                state.url = url.to_string();
+            }
 
-        if let Some(url) = state.urls.iter().choose(&mut rng) {
-            state.url = url.to_string();
+            let duration_secs = state.duration_secs;
+
+            drop(state);
+
+            tokio::time::sleep(std::time::Duration::from_secs_f32(duration_secs)).await;
         }
+    }
+}
 
-        let duration_secs = state.duration_secs;
+mod cache {
+    use crate::error::ErrorMessage;
 
-        drop(state);
+    pub type SafeCache = std::sync::Arc<tokio::sync::Mutex<Cache>>;
 
-        tokio::time::sleep(std::time::Duration::from_secs_f32(duration_secs)).await;
+    #[derive(Default, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Cache {
+        pub map: std::collections::HashMap<String, String>,
+    }
+
+    pub async fn read_cache(filepath: impl AsRef<std::path::Path>) -> Result<Cache, ErrorMessage> {
+        let buf = tokio::fs::read(filepath)
+            .await
+            .map_err(ErrorMessage::from)?;
+        serde_json::from_slice(&buf).map_err(ErrorMessage::from)
+    }
+
+    pub async fn write_cache(
+        filepath: impl AsRef<std::path::Path>,
+        cache: &Cache,
+    ) -> Result<(), ErrorMessage> {
+        let buf = serde_json::to_vec(&cache).map_err(ErrorMessage::from)?;
+        tokio::fs::write(filepath, buf)
+            .await
+            .map_err(ErrorMessage::from)
     }
 }
 
 mod polling {
-    use super::*;
+    use futures::{SinkExt, StreamExt};
+    use warp::Filter;
 
-    #[derive(Serialize)]
+    use crate::state;
+
+    #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Response {
-        date_time: DateTime<Local>,
+        date_time: chrono::DateTime<chrono::Local>,
         url: String,
     }
 
     pub fn handle(
-        safe_state: SafeState,
+        safe_state: state::SafeState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        async fn ws_handle(ws: warp::ws::WebSocket, safe_state: SafeState) {
+        async fn ws_handle(ws: warp::ws::WebSocket, safe_state: state::SafeState) {
             let (mut tx, mut rx) = ws.split();
 
             while let Some(_) = rx.next().await {
                 let state = safe_state.lock().await;
 
                 let res = Response {
-                    date_time: Local::now(),
+                    date_time: chrono::Local::now(),
                     url: state.url.clone(),
                 };
 
@@ -156,9 +186,11 @@ mod polling {
 }
 
 mod pic_list {
-    use super::*;
+    use warp::Filter;
 
-    #[derive(Serialize)]
+    use crate::state;
+
+    #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Response {
         duration_secs: f32,
@@ -167,9 +199,9 @@ mod pic_list {
     }
 
     pub fn handle(
-        safe_state: SafeState,
+        safe_state: state::SafeState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        async fn handle(safe_state: SafeState) -> Result<impl warp::Reply, warp::Rejection> {
+        async fn handle(safe_state: state::SafeState) -> Result<impl warp::Reply, warp::Rejection> {
             let state = safe_state.lock().await;
 
             let res = Response {
@@ -188,9 +220,11 @@ mod pic_list {
 }
 
 mod pic_patch {
-    use super::*;
+    use warp::Filter;
 
-    #[derive(Deserialize)]
+    use crate::{args, state};
+
+    #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Request {
         url: Option<String>,
@@ -198,13 +232,13 @@ mod pic_patch {
     }
 
     pub fn handle(
-        safe_args: SafeArgs,
-        safe_state: SafeState,
+        safe_args: args::SafeArgs,
+        safe_state: state::SafeState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         async fn handle(
             req: Request,
-            safe_args: SafeArgs,
-            safe_state: SafeState,
+            safe_args: args::SafeArgs,
+            safe_state: state::SafeState,
         ) -> Result<impl warp::Reply, warp::Rejection> {
             let mut state = safe_state.lock().await;
 
@@ -216,7 +250,7 @@ mod pic_patch {
                 state.duration_secs = duration_secs;
             }
 
-            write_state(&safe_args.state_filepath, &state).await?;
+            state::write_state(&safe_args.state_filepath, &state).await?;
             Ok(warp::http::StatusCode::OK)
         }
         warp::path("pic")
@@ -229,28 +263,30 @@ mod pic_patch {
 }
 
 mod pic_push {
-    use super::*;
+    use warp::Filter;
 
-    #[derive(Deserialize)]
+    use crate::{args, state};
+
+    #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Request {
         url: String,
     }
 
     pub fn handle(
-        safe_args: SafeArgs,
-        safe_state: SafeState,
+        safe_args: args::SafeArgs,
+        safe_state: state::SafeState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         async fn handle(
             req: Request,
-            safe_args: SafeArgs,
-            safe_state: SafeState,
+            safe_args: args::SafeArgs,
+            safe_state: state::SafeState,
         ) -> Result<impl warp::Reply, warp::Rejection> {
             let mut state = safe_state.lock().await;
 
             state.urls.insert(req.url);
 
-            write_state(&safe_args.state_filepath, &state).await?;
+            state::write_state(&safe_args.state_filepath, &state).await?;
             Ok(warp::http::StatusCode::OK)
         }
         warp::path("pic")
@@ -263,28 +299,30 @@ mod pic_push {
 }
 
 mod pic_pop {
-    use super::*;
+    use warp::Filter;
 
-    #[derive(Deserialize)]
+    use crate::{args, state};
+
+    #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Request {
         url: String,
     }
 
     pub fn hanle(
-        safe_args: SafeArgs,
-        safe_state: SafeState,
+        safe_args: args::SafeArgs,
+        safe_state: state::SafeState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         async fn handle(
             req: Request,
-            safe_args: SafeArgs,
-            safe_state: SafeState,
+            safe_args: args::SafeArgs,
+            safe_state: state::SafeState,
         ) -> Result<impl warp::Reply, warp::Rejection> {
             let mut state = safe_state.lock().await;
 
             state.urls.remove(&req.url);
 
-            write_state(&safe_args.state_filepath, &state).await?;
+            state::write_state(&safe_args.state_filepath, &state).await?;
             Ok(warp::http::StatusCode::OK)
         }
 
@@ -297,22 +335,91 @@ mod pic_pop {
     }
 }
 
-struct ErrorMessage {
-    message: String,
-}
+mod pic_cache {
+    use base64::prelude::*;
+    use rand::prelude::*;
+    use warp::Filter;
 
-impl std::fmt::Debug for ErrorMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+    use crate::{args, cache, error::ErrorMessage};
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Request {
+        url: String,
+    }
+
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Response {
+        id: String,
+    }
+
+    pub fn hanle(
+        safe_args: args::SafeArgs,
+        safe_cache: cache::SafeCache,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        async fn handle(
+            req: Request,
+            safe_args: args::SafeArgs,
+            safe_cache: cache::SafeCache,
+        ) -> Result<impl warp::Reply, warp::Rejection> {
+            let mut cache = safe_cache.lock().await;
+
+            let url = req.url;
+            if !cache.map.contains_key(&url) {
+                let mut bytes = [0; 64];
+                StdRng::from_entropy().fill_bytes(&mut bytes);
+                let id = BASE64_URL_SAFE.encode(bytes);
+
+                let bytes = reqwest::get(&url)
+                    .await
+                    .map_err(ErrorMessage::from)?
+                    .bytes()
+                    .await
+                    .map_err(ErrorMessage::from)?;
+
+                let filepath = &safe_args.cache_dirpath.join(&id);
+                tokio::fs::write(filepath, bytes)
+                    .await
+                    .map_err(ErrorMessage::from)?;
+
+                cache.map.insert(url.clone(), id);
+                cache::write_cache(&safe_args.cache_filepath, &cache).await?;
+            }
+
+            let id = cache.map.get(&url).unwrap().clone();
+            let res = Response { id };
+
+            Ok(warp::reply::json(&res))
+        }
+
+        warp::path("pic_cache")
+            .and(warp::post())
+            .and(warp::body::json())
+            .map(move |req| (req, safe_args.clone(), safe_cache.clone()))
+            .untuple_one()
+            .and_then(handle)
     }
 }
 
-impl<E: std::error::Error> From<E> for ErrorMessage {
-    fn from(value: E) -> Self {
-        ErrorMessage {
-            message: value.to_string(),
+mod error {
+    pub struct ErrorMessage {
+        message: String,
+    }
+
+    impl std::fmt::Debug for ErrorMessage {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.message)
         }
     }
-}
 
-impl warp::reject::Reject for ErrorMessage {}
+    impl<E: std::error::Error> From<E> for ErrorMessage {
+        fn from(value: E) -> Self {
+            ErrorMessage {
+                message: value.to_string(),
+            }
+        }
+    }
+
+    impl warp::reject::Reject for ErrorMessage {}
+}
