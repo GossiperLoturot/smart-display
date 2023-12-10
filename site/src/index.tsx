@@ -10,7 +10,7 @@ render(
     <Router>
       <Routes>
         <Route path="/" component={HomePage} />
-        <Route path="/pic" component={PicturePage} />
+        <Route path="/config" component={PicturePage} />
       </Routes>
     </Router>
   ),

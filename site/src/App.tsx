@@ -11,13 +11,11 @@ import { createStore } from "solid-js/store";
 import { mock } from "./mock";
 import "./App.css";
 
-type Polling = {
-  dateTime: string;
-  url: string;
-};
+type HomePageState = { dateTime: string; url?: string; cachedUrl?: string };
+type PollingResponse = { dateTime: string; url?: string };
 
 export const HomePage = () => {
-  const [polling, setPolling] = createSignal<Polling | undefined>();
+  const [state, setState] = createSignal<HomePageState | undefined>();
 
   createEffect(() => {
     let handle: number | undefined = undefined;
@@ -27,9 +25,14 @@ export const HomePage = () => {
       }, 250);
     };
 
-    const onMessage = (event: MessageEvent<string>) => {
-      const polling = JSON.parse(event.data);
-      cacheImage(polling.url).then((url) => setPolling({ ...polling, url }));
+    const onMessage = async (event: MessageEvent<string>) => {
+      const response: PollingResponse = JSON.parse(event.data);
+      if (response.url != undefined) {
+        const cachedUrl = await getCachePath(response.url);
+        setState({ ...response, cachedUrl });
+      } else {
+        setState(response);
+      }
     };
 
     const ws = new WebSocket(`${mock.wsUrl}/polling`);
@@ -45,11 +48,13 @@ export const HomePage = () => {
   }, []);
 
   return (
-    <Show when={polling()} fallback={<div>Loading</div>}>
-      {(polling) => (
+    <Show when={state()} fallback={<div>Loading</div>}>
+      {(state) => (
         <>
-          <ClockComponent dateTime={() => new Date(polling().dateTime)} />
-          <img src={polling().url} class="bg" />
+          <ClockComponent dateTime={() => new Date(state().dateTime)} />
+          <Show when={state().cachedUrl}>
+            {(cachedUrl) => <img src={cachedUrl()} class="bg" />}
+          </Show>
         </>
       )}
     </Show>
@@ -77,63 +82,74 @@ const ClockComponent = ({ dateTime }: { dateTime: () => Date }) => {
   );
 };
 
-type PicListOut = { durationSecs: number; urls: string[]; url: string };
-type PicPushIn = { url: string };
-type PicPopIn = { url: string };
-type PicPatchIn = { url?: string; durationSecs?: number };
-type PicCacheIn = { url: string };
-type PicCacheOut = { id: string };
+type PictureIndexResponse = {
+  durationSecs: number;
+  urls: string[];
+  url?: string;
+};
+type PictureCreateRequest = { url: string };
+type PictureDeleteRequest = { url: string };
+type PictureApplyRequest = { url?: string; durationSecs?: number };
+type PictureCacheRequest = { url: string };
+type PictureCacheResponse = { id: string };
 
 export const PicturePage = () => {
-  const [picList, { refetch }] = createResource(async () => {
-    const response = await fetch(`${mock.apiUrl}/pic`);
-    const output: PicListOut = await response.json();
+  const [state, { refetch }] = createResource(async () => {
+    const response: PictureIndexResponse = await fetch(
+      `${mock.apiUrl}/config`,
+    ).then((response) => response.json());
 
-    output.url = await cacheImage(output.url);
-    for (let i = 0; i < output.urls.length; i++) {
-      output.urls[i] = await cacheImage(output.urls[i]);
+    let cachedUrl = undefined;
+    if (response.url != undefined) {
+      cachedUrl = await getCachePath(response.url);
     }
-    return output;
+
+    const cachedUrls = new Array(response.urls.length);
+    for (let i = 0; i < response.urls.length; i++) {
+      cachedUrls[i] = await getCachePath(response.urls[i]);
+    }
+
+    return { ...response, cachedUrl, cachedUrls };
   });
   const [pushForm, setPushForm] = createStore({ url: "" });
   const [patchForm, setPatchForm] = createStore({ durationSecs: "" });
 
-  const onPush = async (input: PicPushIn) => {
-    await fetch(`${mock.apiUrl}/pic`, {
+  const onCreate = async (request: PictureCreateRequest) => {
+    await fetch(`${mock.apiUrl}/config`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
+      body: JSON.stringify(request),
     });
     await refetch();
   };
 
-  const onPop = async (input: PicPopIn) => {
-    await fetch(`${mock.apiUrl}/pic`, {
+  const onDelete = async (request: PictureDeleteRequest) => {
+    await fetch(`${mock.apiUrl}/config`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
+      body: JSON.stringify(request),
     });
     await refetch();
   };
 
-  const onPatch = async (input: PicPatchIn) => {
-    await fetch(`${mock.apiUrl}/pic`, {
+  const onApply = async (request: PictureApplyRequest) => {
+    await fetch(`${mock.apiUrl}/config`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
+      body: JSON.stringify(request),
     });
     await refetch();
   };
 
   return (
-    <Show when={picList()} fallback={<div>Loading</div>}>
-      {(picList) => (
+    <Show when={state()} fallback={<div>Loading</div>}>
+      {(state) => (
         <>
           <div class="title">Pictures</div>
           <div class="head">
             <div class="head-top">
               <div class="head-top-label">
-                Duration: {picList().durationSecs} secs
+                Duration: {state().durationSecs} secs
               </div>
               <input
                 type="number"
@@ -147,7 +163,7 @@ export const PicturePage = () => {
               <button
                 class="head-top-button"
                 onClick={() =>
-                  onPatch({ durationSecs: parseFloat(patchForm.durationSecs) })
+                  onApply({ durationSecs: parseFloat(patchForm.durationSecs) })
                 }
               >
                 submit
@@ -156,14 +172,14 @@ export const PicturePage = () => {
             <div class="head-bottom">
               <div class="item-img-container">
                 <img
-                  src={picList().url}
+                  src={state().cachedUrl}
                   width="100px"
                   height="100px"
                   class="item-img"
                 />
               </div>
               <div class="item-url-container">
-                <div class="item-url">{picList().url}</div>
+                <div class="item-url">{state().url}</div>
               </div>
             </div>
           </div>
@@ -187,24 +203,24 @@ export const PicturePage = () => {
             <div class="item-act-container">
               <button
                 class="item-act"
-                onClick={() => onPush({ url: pushForm.url })}
+                onClick={() => onCreate({ url: pushForm.url })}
               >
                 +
               </button>
               <button
                 class="item-act"
-                onClick={() => onPatch({ url: pushForm.url })}
+                onClick={() => onApply({ url: pushForm.url })}
               >
                 *
               </button>
             </div>
           </div>
-          <For each={picList().urls}>
-            {(url) => (
+          <For each={state().urls}>
+            {(url, i) => (
               <div class="item">
                 <div class="item-img-container">
                   <img
-                    src={url}
+                    src={state().cachedUrls[i()]}
                     width="100px"
                     height="100px"
                     class="item-img"
@@ -214,10 +230,10 @@ export const PicturePage = () => {
                   <div class="item-url">{url}</div>
                 </div>
                 <div class="item-act-container">
-                  <button class="item-act" onClick={() => onPop({ url })}>
+                  <button class="item-act" onClick={() => onDelete({ url })}>
                     -
                   </button>
-                  <button class="item-act" onClick={() => onPatch({ url })}>
+                  <button class="item-act" onClick={() => onApply({ url })}>
                     *
                   </button>
                 </div>
@@ -230,14 +246,12 @@ export const PicturePage = () => {
   );
 };
 
-async function cacheImage(url: string): Promise<string> {
-  const input: PicCacheIn = { url };
-  const response = await fetch(`${mock.apiUrl}/pic_cache`, {
+async function getCachePath(url: string): Promise<string> {
+  const request: PictureCacheRequest = { url };
+  const response: PictureCacheResponse = await fetch(`${mock.apiUrl}/cache`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  const output: PicCacheOut = await response.json();
-
-  return `${mock.cacheUrl}/${output.id}`;
+    body: JSON.stringify(request),
+  }).then((response) => response.json());
+  return `${mock.cacheUrl}/${response.id}`;
 }
