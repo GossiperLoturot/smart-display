@@ -14,27 +14,86 @@ body {
 
 .clock {
   margin: auto;
+  background-color: #0001;
+  border: solid 1px #0002;
+  border-radius: 16px;
+  padding: 32px;
+  backdrop-filter: blur(16px);
 }
 
 .clock-date {
   color: white;
   font-size: 32px;
   text-align: center;
-  text-shadow: 0px 0px 8px #0008;
 }
 
 .clock-time {
   color: white;
   font-size: 128px;
   text-align: center;
-  text-shadow: 0px 0px 8px #0008;
 }
 
 .clock-meta {
   color: white;
   font-size: 32px;
   text-align: center;
-  text-shadow: 0px 0px 8px #0008;
+}
+
+.progress-container {
+  width: 100vw;
+  height: 100vh;
+  position: absolute;
+  display: flex;
+  inset: 0;
+}
+
+.progress {
+  margin: auto auto 32px auto;
+  background-color: #0001;
+  border: solid 1px #0002;
+  border-radius: 16px;
+  padding: 32px;
+  backdrop-filter: blur(16px);
+}
+
+.progress-day {
+  display: flex;
+  gap: 1rem;
+}
+
+.progress-month {
+  display: flex;
+  gap: 1rem;
+}
+
+.progress-year {
+  display: flex;
+  gap: 1rem;
+}
+
+.progress-label {
+  width: 3rem;
+  text-align: left;
+  color: white;
+}
+
+.progress-value {
+  width: 3rem;
+  text-align: right;
+  color: white;
+}
+
+.progress-barouter {
+  width: 200px;
+  height: 12px;
+  border: solid 1px #0002;
+  border-radius: 6px;
+}
+
+.progress-barinner {
+    height: 100%;
+    background-color: #FFF;
+    border-radius: 6px;
 }
 
 .bg {

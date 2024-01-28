@@ -23,21 +23,6 @@ async fn main() {
     };
     let safe_server_state = std::sync::Arc::new(tokio::sync::Mutex::new(server_state));
 
-    let filepath = &safe_args.cache_filepath;
-    let cache_state = match cache::CacheState::read(filepath).await {
-        Ok(cache_state) => {
-            println!("open cache state file {:?}.", filepath);
-            cache_state
-        }
-        Err(e) => {
-            println!("can't open cache state file {:?}.", filepath);
-            println!("{:?}", e);
-            println!("use default cache state");
-            cache::CacheState::default()
-        }
-    };
-    let safe_cache_state = std::sync::Arc::new(tokio::sync::Mutex::new(cache_state));
-
     let filter = warp::path("api")
         .and(
             polling::handle(safe_server_state.clone())
@@ -50,16 +35,11 @@ async fn main() {
                     safe_args.clone(),
                     safe_server_state.clone(),
                 ))
-                .or(picture_delete::hanle(
+                .or(picture_delete::handle(
                     safe_args.clone(),
                     safe_server_state.clone(),
-                ))
-                .or(picture_cache::hanle(
-                    safe_args.clone(),
-                    safe_cache_state.clone(),
                 )),
         )
-        .or(warp::path("cache").and(warp::fs::dir(safe_args.cache_dirpath.clone())))
         .or(warp::fs::dir(safe_args.dist_dirpath.clone()))
         .or(warp::fs::file(safe_args.dist_filepath.clone()))
         .with(
@@ -95,10 +75,6 @@ mod args {
         pub dist_dirpath: std::path::PathBuf,
         #[arg(long)]
         pub dist_filepath: std::path::PathBuf,
-        #[arg(long)]
-        pub cache_dirpath: std::path::PathBuf,
-        #[arg(long)]
-        pub cache_filepath: std::path::PathBuf,
         #[arg(long)]
         pub address: std::net::SocketAddr,
     }
@@ -167,45 +143,6 @@ mod server {
     }
 }
 
-mod cache {
-    use crate::error::ErrorMessage;
-
-    pub type SafeCacheState = std::sync::Arc<tokio::sync::Mutex<CacheState>>;
-
-    #[derive(serde::Serialize, serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CacheState {
-        pub map: std::collections::HashMap<String, String>,
-    }
-
-    impl CacheState {
-        pub async fn read(filepath: impl AsRef<std::path::Path>) -> Result<Self, ErrorMessage> {
-            let buf = tokio::fs::read(filepath)
-                .await
-                .map_err(ErrorMessage::from)?;
-            serde_json::from_slice(&buf).map_err(ErrorMessage::from)
-        }
-
-        pub async fn write(
-            &self,
-            filepath: impl AsRef<std::path::Path>,
-        ) -> Result<(), ErrorMessage> {
-            let buf = serde_json::to_vec(self).map_err(ErrorMessage::from)?;
-            tokio::fs::write(filepath, buf)
-                .await
-                .map_err(ErrorMessage::from)
-        }
-    }
-
-    impl Default for CacheState {
-        fn default() -> Self {
-            Self {
-                map: std::collections::HashMap::new(),
-            }
-        }
-    }
-}
-
 mod polling {
     use futures::{SinkExt, StreamExt};
     use warp::Filter;
@@ -227,7 +164,7 @@ mod polling {
 
             let (mut tx, mut rx) = ws.split();
 
-            while let Some(_) = rx.next().await {
+            while rx.next().await.is_some() {
                 let server_state = safe_server_state.lock().await;
 
                 let response = Response {
@@ -239,6 +176,7 @@ mod polling {
                 let _ = tx.send(message).await;
             }
         }
+
         warp::path("polling")
             .and(warp::ws())
             .map(move |ws| (ws, safe_server_state.clone()))
@@ -280,6 +218,7 @@ mod picture_index {
 
             Ok(warp::reply::json(&response))
         }
+
         warp::path("config")
             .and(warp::get())
             .map(move || safe_server_state.clone())
@@ -323,6 +262,7 @@ mod picture_apply {
             server_state.write(&safe_args.server_filepath).await?;
             Ok(warp::http::StatusCode::OK)
         }
+
         warp::path("config")
             .and(warp::patch())
             .and(warp::body::json())
@@ -361,6 +301,7 @@ mod picture_create {
             server_state.write(&safe_args.server_filepath).await?;
             Ok(warp::http::StatusCode::OK)
         }
+
         warp::path("config")
             .and(warp::post())
             .and(warp::body::json())
@@ -381,7 +322,7 @@ mod picture_delete {
         url: String,
     }
 
-    pub fn hanle(
+    pub fn handle(
         safe_args: args::SafeArgs,
         safe_server_state: server::SafeServerState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
@@ -404,73 +345,6 @@ mod picture_delete {
             .and(warp::delete())
             .and(warp::body::json())
             .map(move |request| (request, safe_args.clone(), safe_server_state.clone()))
-            .untuple_one()
-            .and_then(handle)
-    }
-}
-
-mod picture_cache {
-    use base64::prelude::*;
-    use rand::prelude::*;
-    use warp::Filter;
-
-    use crate::{args, cache, error::ErrorMessage};
-
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Request {
-        url: String,
-    }
-
-    #[derive(serde::Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Response {
-        id: String,
-    }
-
-    pub fn hanle(
-        safe_args: args::SafeArgs,
-        safe_cache_state: cache::SafeCacheState,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        async fn handle(
-            request: Request,
-            safe_args: args::SafeArgs,
-            safe_cache_state: cache::SafeCacheState,
-        ) -> Result<impl warp::Reply, warp::Rejection> {
-            // println!("request picture cache {:?}.", request.url);
-
-            let mut cache_state = safe_cache_state.lock().await;
-            if let Some(id) = cache_state.map.get(&request.url).cloned() {
-                let response = Response { id };
-                return Ok(warp::reply::json(&response));
-            }
-
-            let mut bytes = [0; 64];
-            StdRng::from_entropy().fill_bytes(&mut bytes);
-            let id = BASE64_URL_SAFE.encode(bytes);
-
-            let filepath = &safe_args.cache_dirpath.join(&id);
-            let cache_bytes = reqwest::get(&request.url)
-                .await
-                .map_err(ErrorMessage::from)?
-                .bytes()
-                .await
-                .map_err(ErrorMessage::from)?;
-            tokio::fs::write(filepath, cache_bytes)
-                .await
-                .map_err(ErrorMessage::from)?;
-
-            println!("create picture cache {:?} -> {:?}.", request.url, id);
-            cache_state.map.insert(request.url.clone(), id.clone());
-            cache_state.write(&safe_args.cache_filepath).await?;
-
-            let response = Response { id };
-            Ok(warp::reply::json(&response))
-        }
-        warp::path("cache")
-            .and(warp::post())
-            .and(warp::body::json())
-            .map(move |request| (request, safe_args.clone(), safe_cache_state.clone()))
             .untuple_one()
             .and_then(handle)
     }

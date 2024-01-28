@@ -1,4 +1,12 @@
-import { format } from "date-fns";
+import {
+  endOfDay,
+  endOfMonth,
+  endOfYear,
+  format,
+  startOfDay,
+  startOfMonth,
+  startOfYear,
+} from "date-fns";
 import {
   For,
   Show,
@@ -8,10 +16,10 @@ import {
   createSignal,
 } from "solid-js";
 import { createStore } from "solid-js/store";
-import { mock } from "./mock";
 import "./App.css";
+import { mock } from "./mock";
 
-type HomePageState = { dateTime: string; url?: string; cachedUrl?: string };
+type HomePageState = { dateTime: string; url?: string };
 type PollingResponse = { dateTime: string; url?: string };
 
 export const HomePage = () => {
@@ -27,12 +35,7 @@ export const HomePage = () => {
 
     const onMessage = async (event: MessageEvent<string>) => {
       const response: PollingResponse = JSON.parse(event.data);
-      if (response.url != undefined) {
-        const cachedUrl = await getCachePath(response.url);
-        setState({ ...response, cachedUrl });
-      } else {
-        setState(response);
-      }
+      setState(response);
     };
 
     const ws = new WebSocket(`${mock.wsUrl}/polling`);
@@ -52,8 +55,9 @@ export const HomePage = () => {
       {(state) => (
         <>
           <ClockComponent dateTime={() => new Date(state().dateTime)} />
-          <Show when={state().cachedUrl}>
-            {(cachedUrl) => <img src={cachedUrl()} class="bg" />}
+          <ProgressComponent dateTime={() => new Date(state().dateTime)} />
+          <Show when={state().url}>
+            {(url) => <img src={url()} class="bg" />}
           </Show>
         </>
       )}
@@ -63,11 +67,11 @@ export const HomePage = () => {
 
 const ClockComponent = ({ dateTime }: { dateTime: () => Date }) => {
   const clock = createMemo(() => {
-    const date = new Date(dateTime());
+    const now = dateTime();
     return {
-      date: format(date, "yyyy/MM/dd eeee, BBBB"),
-      time: format(date, "HH:mm:ss"),
-      meta: format(date, "QQQQ, OOOO"),
+      date: format(now, "yyyy/MM/dd eeee, BBBB"),
+      time: format(now, "HH:mm:ss"),
+      meta: format(now, "QQQQ, OOOO"),
     };
   });
 
@@ -82,6 +86,75 @@ const ClockComponent = ({ dateTime }: { dateTime: () => Date }) => {
   );
 };
 
+const ProgressComponent = ({ dateTime }: { dateTime: () => Date }) => {
+  function threshold(x: number, start: number, end: number) {
+    return (x - start) / (end - start);
+  }
+
+  const progress = createMemo(() => {
+    const now = dateTime();
+    const day = threshold(
+      now.valueOf(),
+      startOfDay(now).valueOf(),
+      endOfDay(now).valueOf(),
+    );
+    const month = threshold(
+      now.valueOf(),
+      startOfMonth(now).valueOf(),
+      endOfMonth(now).valueOf(),
+    );
+    const year = threshold(
+      now.valueOf(),
+      startOfYear(now).valueOf(),
+      endOfYear(now).valueOf(),
+    );
+    return { day, month, year };
+  });
+
+  return (
+    <div class="progress-container">
+      <div class="progress">
+        <div class="progress-day">
+          <div class="progress-label">Day</div>
+          <div class="progress-value">{`${(progress().day * 100.0).toFixed(
+            1,
+          )}%`}</div>
+          <div class="progress-barouter">
+            <div
+              class="progress-barinner"
+              style={`width:${progress().day * 100.0}%`}
+            />
+          </div>
+        </div>
+        <div class="progress-month">
+          <div class="progress-label">Month</div>
+          <div class="progress-value">{`${(progress().month * 100.0).toFixed(
+            1,
+          )}%`}</div>
+          <div class="progress-barouter">
+            <div
+              class="progress-barinner"
+              style={`width:${progress().month * 100.0}%`}
+            />
+          </div>
+        </div>
+        <div class="progress-year">
+          <div class="progress-label">Year</div>
+          <div class="progress-value">{`${(progress().year * 100.0).toFixed(
+            1,
+          )}%`}</div>
+          <div class="progress-barouter">
+            <div
+              class="progress-barinner"
+              style={`width:${progress().year * 100.0}%`}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 type PictureIndexResponse = {
   durationSecs: number;
   urls: string[];
@@ -90,26 +163,13 @@ type PictureIndexResponse = {
 type PictureCreateRequest = { url: string };
 type PictureDeleteRequest = { url: string };
 type PictureApplyRequest = { url?: string; durationSecs?: number };
-type PictureCacheRequest = { url: string };
-type PictureCacheResponse = { id: string };
 
 export const PicturePage = () => {
   const [state, { refetch }] = createResource(async () => {
     const response: PictureIndexResponse = await fetch(
       `${mock.apiUrl}/config`,
     ).then((response) => response.json());
-
-    let cachedUrl = undefined;
-    if (response.url != undefined) {
-      cachedUrl = await getCachePath(response.url);
-    }
-
-    const cachedUrls = new Array(response.urls.length);
-    for (let i = 0; i < response.urls.length; i++) {
-      cachedUrls[i] = await getCachePath(response.urls[i]);
-    }
-
-    return { ...response, cachedUrl, cachedUrls };
+    return response;
   });
   const [pushForm, setPushForm] = createStore({ url: "" });
   const [patchForm, setPatchForm] = createStore({ durationSecs: "" });
@@ -172,7 +232,7 @@ export const PicturePage = () => {
             <div class="head-bottom">
               <div class="item-img-container">
                 <img
-                  src={state().cachedUrl}
+                  src={state().url}
                   width="100px"
                   height="100px"
                   class="item-img"
@@ -220,7 +280,7 @@ export const PicturePage = () => {
               <div class="item">
                 <div class="item-img-container">
                   <img
-                    src={state().cachedUrls[i()]}
+                    src={state().urls[i()]}
                     width="100px"
                     height="100px"
                     class="item-img"
@@ -245,13 +305,3 @@ export const PicturePage = () => {
     </Show>
   );
 };
-
-async function getCachePath(url: string): Promise<string> {
-  const request: PictureCacheRequest = { url };
-  const response: PictureCacheResponse = await fetch(`${mock.apiUrl}/cache`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  }).then((response) => response.json());
-  return `${mock.cacheUrl}/${response.id}`;
-}

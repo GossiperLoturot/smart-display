@@ -1,6 +1,6 @@
+import { Route, Router } from "@solidjs/router";
 /* @refresh reload */
 import { render } from "solid-js/web";
-import { Router, Routes, Route } from "@solidjs/router";
 import { HomePage, PicturePage } from "./App";
 
 const root = document.getElementById("root");
@@ -8,10 +8,8 @@ const root = document.getElementById("root");
 render(
   () => (
     <Router>
-      <Routes>
-        <Route path="/" component={HomePage} />
-        <Route path="/config" component={PicturePage} />
-      </Routes>
+      <Route path="/" component={HomePage} />
+      <Route path="/config" component={PicturePage} />
     </Router>
   ),
   root!,
