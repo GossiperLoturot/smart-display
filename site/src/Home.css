@@ -1,0 +1,109 @@
+@import url("https://fonts.googleapis.com/css2?family=Roboto&display=swap");
+
+body {
+  font-family: "Roboto", sans-serif;
+}
+
+.container-outer {
+  width: 100vw;
+  height: 100vh;
+  position: absolute;
+  inset: 0;
+  display: flex;
+}
+
+.container-inner {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.clock {
+  margin: 0 auto;
+  background-color: #0001;
+  border: solid 1px #0002;
+  border-radius: 16px;
+  padding: 32px;
+  backdrop-filter: blur(16px);
+}
+
+.clock-date {
+  color: white;
+  font-size: 32px;
+  text-align: center;
+}
+
+.clock-time {
+  color: white;
+  font-size: 128px;
+  text-align: center;
+}
+
+.clock-meta {
+  color: white;
+  font-size: 32px;
+  text-align: center;
+}
+
+.progress {
+  margin: 0 auto;
+  background-color: #0001;
+  border: solid 1px #0002;
+  border-radius: 16px;
+  padding: 32px;
+  backdrop-filter: blur(16px);
+}
+
+.progress-day {
+  display: flex;
+  gap: 1rem;
+}
+
+.progress-month {
+  display: flex;
+  gap: 1rem;
+}
+
+.progress-year {
+  display: flex;
+  gap: 1rem;
+}
+
+.progress-label {
+  width: 3rem;
+  font-size: 16px;
+  text-align: left;
+  color: white;
+}
+
+.progress-value {
+  width: 3rem;
+  font-size: 16px;
+  text-align: right;
+  color: white;
+}
+
+.progress-barouter {
+  margin: auto;
+  width: 200px;
+  height: 12px;
+  border: solid 1px #0002;
+  border-radius: 6px;
+}
+
+.progress-barinner {
+    height: 100%;
+    min-width: 12px;
+    background-color: #FFF;
+    border-radius: 6px;
+}
+
+.bg {
+  width: 100vw;
+  height: 100vh;
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  object-fit: cover;
+}
