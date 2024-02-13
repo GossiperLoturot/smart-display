@@ -1,15 +1,13 @@
-use std::*;
-
 use clap::Parser;
 use warp::Filter;
 
 #[tokio::main]
 async fn main() {
     let args = args::Args::parse();
-    let safe_args = std::sync::Arc::new(args);
+    let args = std::sync::Arc::new(args);
 
-    let filepath = &safe_args.server_filepath;
-    let server_state = match server::ServerState::read(filepath).await {
+    let filepath = &args.state_filepath;
+    let state = match server::State::read(filepath).await {
         Ok(server_state) => {
             println!("open server state file {:?}.", filepath);
             server_state
@@ -18,30 +16,21 @@ async fn main() {
             println!("can't open server state file {:?}.", filepath);
             println!("{:?}", e);
             println!("use default server state");
-            server::ServerState::default()
+            server::State::default()
         }
     };
-    let safe_server_state = std::sync::Arc::new(tokio::sync::Mutex::new(server_state));
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(state));
 
     let filter = warp::path("api")
         .and(
-            polling::handle(safe_server_state.clone())
-                .or(picture_index::handle(safe_server_state.clone()))
-                .or(picture_apply::handle(
-                    safe_args.clone(),
-                    safe_server_state.clone(),
-                ))
-                .or(picture_create::handle(
-                    safe_args.clone(),
-                    safe_server_state.clone(),
-                ))
-                .or(picture_delete::handle(
-                    safe_args.clone(),
-                    safe_server_state.clone(),
-                )),
+            polling::handle(state.clone())
+                .or(picture_index::handle(state.clone()))
+                .or(picture_apply::handle(args.clone(), state.clone()))
+                .or(picture_create::handle(args.clone(), state.clone()))
+                .or(picture_delete::handle(args.clone(), state.clone())),
         )
-        .or(warp::fs::dir(safe_args.dist_dirpath.clone()))
-        .or(warp::fs::file(safe_args.dist_filepath.clone()))
+        .or(warp::fs::dir(args.dist_dirpath.clone()))
+        .or(warp::fs::file(args.dist_filepath.clone()))
         .with(
             warp::cors()
                 .allow_any_origin()
@@ -51,15 +40,15 @@ async fn main() {
         );
 
     tokio::spawn(async {
-        server::ServerState::safe_loop(safe_server_state).await;
+        server::State::run(state).await;
     });
 
-    println!("listening on {}.", safe_args.address);
-    warp::serve(filter).run(safe_args.address).await;
+    println!("listening on {}.", args.address);
+    warp::serve(filter).run(args.address).await;
 }
 
 mod args {
-    pub type SafeArgs = std::sync::Arc<Args>;
+    pub type SyncArgs = std::sync::Arc<Args>;
 
     #[derive(clap::Parser)]
     #[clap(
@@ -70,7 +59,7 @@ mod args {
     )]
     pub struct Args {
         #[arg(long)]
-        pub server_filepath: std::path::PathBuf,
+        pub state_filepath: std::path::PathBuf,
         #[arg(long)]
         pub dist_dirpath: std::path::PathBuf,
         #[arg(long)]
@@ -81,46 +70,47 @@ mod args {
 }
 
 mod server {
+    use anyhow::Context;
     use rand::prelude::*;
 
-    use crate::error::ErrorMessage;
-
-    pub type SafeServerState = std::sync::Arc<tokio::sync::Mutex<ServerState>>;
+    pub type SyncState = std::sync::Arc<tokio::sync::Mutex<State>>;
 
     #[derive(serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
-    pub struct ServerState {
+    pub struct State {
         pub duration_secs: f32,
         pub url_set: std::collections::HashSet<String>,
         pub current_url: Option<String>,
     }
 
-    impl ServerState {
-        pub async fn read(filepath: impl AsRef<std::path::Path>) -> Result<Self, ErrorMessage> {
+    impl State {
+        pub async fn read(filepath: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
             let buf = tokio::fs::read(filepath)
                 .await
-                .map_err(ErrorMessage::from)?;
-            serde_json::from_slice(&buf).map_err(ErrorMessage::from)
+                .context("failed to read state from file")?;
+            let slf =
+                serde_json::from_slice(&buf).context("failed to deserialize state from json")?;
+            Ok(slf)
         }
 
-        pub async fn write(
-            &self,
-            filepath: impl AsRef<std::path::Path>,
-        ) -> Result<(), ErrorMessage> {
-            let buf = serde_json::to_vec(self).map_err(ErrorMessage::from)?;
+        pub async fn write(&self, filepath: impl AsRef<std::path::Path>) -> anyhow::Result<()> {
+            let buf = serde_json::to_vec(self).context("failed to serialize state to json")?;
             tokio::fs::write(filepath, buf)
                 .await
-                .map_err(ErrorMessage::from)
+                .context("failed to write state to file")?;
+            Ok(())
         }
 
-        pub async fn safe_loop(safe_state: SafeServerState) {
+        pub async fn run(state: SyncState) {
             let mut rng = StdRng::from_entropy();
+            let client = reqwest::Client::new();
 
             loop {
-                let mut state = safe_state.lock().await;
+                let mut state = state.lock().await;
 
-                if let Some(url) = state.url_set.iter().choose(&mut rng) {
-                    state.current_url = Some(url.to_string());
+                match state.update(&mut rng, &client).await {
+                    Ok(()) => println!("update state"),
+                    Err(e) => println!("{}", e),
                 }
 
                 let duration_secs = state.duration_secs;
@@ -130,9 +120,55 @@ mod server {
                 tokio::time::sleep(std::time::Duration::from_secs_f32(duration_secs)).await;
             }
         }
+
+        async fn update(
+            &mut self,
+            rng: &mut rand::rngs::StdRng,
+            client: &reqwest::Client,
+        ) -> anyhow::Result<()> {
+            let url = self
+                .url_set
+                .iter()
+                .choose(rng)
+                .cloned()
+                .context("failed to choose image url")?;
+
+            let response = client
+                .get(url)
+                .send()
+                .await
+                .context("failed to http request")?;
+
+            if !response
+                .headers()
+                .get("Content-Type")
+                .map(|value| value.as_bytes().starts_with(b"image/"))
+                .unwrap_or_default()
+            {
+                anyhow::bail!("invalid Content-Type");
+            }
+
+            let bytes = response
+                .bytes()
+                .await
+                .context("failed to read http response body")?;
+
+            let img =
+                image::load_from_memory(&bytes).context("failed to load image from response")?;
+            let col = compute_repr_color(&img.to_rgb8());
+
+            let mut buf = std::io::Cursor::new(vec![]);
+            img.write_to(&mut buf, image::ImageFormat::WebP)
+                .context("failed to save webp from image")?;
+            let vec = buf.into_inner();
+
+            println!("{:?}, {}", col, vec.len());
+
+            Ok(())
+        }
     }
 
-    impl Default for ServerState {
+    impl Default for State {
         fn default() -> Self {
             Self {
                 duration_secs: 60.0,
@@ -140,6 +176,17 @@ mod server {
                 current_url: None,
             }
         }
+    }
+
+    fn compute_repr_color(img: &image::RgbImage) -> image::Rgb<u8> {
+        let pixel_len = img.len() / 3;
+        let r = img.iter().step_by(3);
+        let g = img.iter().skip(1).step_by(3);
+        let b = img.iter().skip(2).step_by(3);
+        let avg_r = (r.fold(0, |acc, x| acc + *x as usize) / pixel_len) as u8;
+        let avg_g = (g.fold(0, |acc, x| acc + *x as usize) / pixel_len) as u8;
+        let avg_b = (b.fold(0, |acc, x| acc + *x as usize) / pixel_len) as u8;
+        image::Rgb([avg_r, avg_g, avg_b])
     }
 }
 
@@ -157,19 +204,19 @@ mod polling {
     }
 
     pub fn handle(
-        safe_server_state: server::SafeServerState,
+        state: server::SyncState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        async fn ws_handle(ws: warp::ws::WebSocket, safe_server_state: server::SafeServerState) {
+        async fn ws_handle(ws: warp::ws::WebSocket, state: server::SyncState) {
             println!("connect websocket transaction.");
 
             let (mut tx, mut rx) = ws.split();
 
             while rx.next().await.is_some() {
-                let server_state = safe_server_state.lock().await;
+                let state = state.lock().await;
 
                 let response = Response {
                     date_time: chrono::Local::now(),
-                    url: server_state.current_url.clone(),
+                    url: state.current_url.clone(),
                 };
 
                 let message = warp::ws::Message::text(serde_json::to_string(&response).unwrap());
@@ -179,11 +226,9 @@ mod polling {
 
         warp::path("polling")
             .and(warp::ws())
-            .map(move |ws| (ws, safe_server_state.clone()))
+            .map(move |ws| (ws, state.clone()))
             .untuple_one()
-            .map(|ws: warp::ws::Ws, safe_server_state| {
-                ws.on_upgrade(|ws| ws_handle(ws, safe_server_state))
-            })
+            .map(|ws: warp::ws::Ws, state| ws.on_upgrade(|ws| ws_handle(ws, state)))
     }
 }
 
@@ -201,28 +246,26 @@ mod picture_index {
     }
 
     pub fn handle(
-        safe_server_state: server::SafeServerState,
+        state: server::SyncState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        async fn handle(
-            safe_server_state: server::SafeServerState,
-        ) -> Result<impl warp::Reply, warp::Rejection> {
+        async fn handle(state: server::SyncState) -> impl warp::Reply {
             println!("request picture index.");
 
-            let server_state = safe_server_state.lock().await;
+            let state = state.lock().await;
 
             let response = Response {
-                duration_secs: server_state.duration_secs,
-                urls: server_state.url_set.iter().cloned().collect::<Vec<_>>(),
-                url: server_state.current_url.clone(),
+                duration_secs: state.duration_secs,
+                urls: state.url_set.iter().cloned().collect::<Vec<_>>(),
+                url: state.current_url.clone(),
             };
 
-            Ok(warp::reply::json(&response))
+            warp::reply::json(&response)
         }
 
         warp::path("config")
             .and(warp::get())
-            .map(move || safe_server_state.clone())
-            .and_then(handle)
+            .map(move || state.clone())
+            .then(handle)
     }
 }
 
@@ -239,36 +282,41 @@ mod picture_apply {
     }
 
     pub fn handle(
-        safe_args: args::SafeArgs,
-        safe_server_state: server::SafeServerState,
+        args: args::SyncArgs,
+        state: server::SyncState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         async fn handle(
             request: Request,
-            safe_args: args::SafeArgs,
-            safe_server_state: server::SafeServerState,
-        ) -> Result<impl warp::Reply, warp::Rejection> {
+            args: args::SyncArgs,
+            state: server::SyncState,
+        ) -> impl warp::Reply {
             println!("apply picture {:?}.", request.url);
 
-            let mut server_state = safe_server_state.lock().await;
+            let mut state = state.lock().await;
 
             if let Some(url) = request.url {
-                server_state.current_url = Some(url);
+                println!("change current url");
+                state.current_url = Some(url);
             }
 
             if let Some(duration_secs) = request.duration_secs {
-                server_state.duration_secs = duration_secs;
+                println!("change duration secs");
+                state.duration_secs = duration_secs;
             }
 
-            server_state.write(&safe_args.server_filepath).await?;
-            Ok(warp::http::StatusCode::OK)
+            if state.write(&args.state_filepath).await.is_err() {
+                println!("failed to write state");
+            }
+
+            warp::http::StatusCode::OK
         }
 
         warp::path("config")
             .and(warp::patch())
             .and(warp::body::json())
-            .map(move |request| (request, safe_args.clone(), safe_server_state.clone()))
+            .map(move |request| (request, args.clone(), state.clone()))
             .untuple_one()
-            .and_then(handle)
+            .then(handle)
     }
 }
 
@@ -284,30 +332,33 @@ mod picture_create {
     }
 
     pub fn handle(
-        safe_args: args::SafeArgs,
-        safe_server_state: server::SafeServerState,
+        args: args::SyncArgs,
+        state: server::SyncState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         async fn handle(
             request: Request,
-            safe_args: args::SafeArgs,
-            safe_server_state: server::SafeServerState,
-        ) -> Result<impl warp::Reply, warp::Rejection> {
+            args: args::SyncArgs,
+            state: server::SyncState,
+        ) -> impl warp::Reply {
             println!("create picture {:?}.", request.url);
 
-            let mut server_state = safe_server_state.lock().await;
+            let mut state = state.lock().await;
 
-            server_state.url_set.insert(request.url);
+            state.url_set.insert(request.url);
 
-            server_state.write(&safe_args.server_filepath).await?;
-            Ok(warp::http::StatusCode::OK)
+            if state.write(&args.state_filepath).await.is_err() {
+                println!("failed to write state");
+            }
+
+            warp::http::StatusCode::OK
         }
 
         warp::path("config")
             .and(warp::post())
             .and(warp::body::json())
-            .map(move |request| (request, safe_args.clone(), safe_server_state.clone()))
+            .map(move |request| (request, args.clone(), state.clone()))
             .untuple_one()
-            .and_then(handle)
+            .then(handle)
     }
 }
 
@@ -323,51 +374,32 @@ mod picture_delete {
     }
 
     pub fn handle(
-        safe_args: args::SafeArgs,
-        safe_server_state: server::SafeServerState,
+        args: args::SyncArgs,
+        state: server::SyncState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         async fn handle(
             request: Request,
-            safe_args: args::SafeArgs,
-            safe_server_state: server::SafeServerState,
-        ) -> Result<impl warp::Reply, warp::Rejection> {
+            args: args::SyncArgs,
+            state: server::SyncState,
+        ) -> impl warp::Reply {
             println!("delete picture {:?}.", request.url);
 
-            let mut server_state = safe_server_state.lock().await;
+            let mut state = state.lock().await;
 
-            server_state.url_set.remove(&request.url);
+            state.url_set.remove(&request.url);
 
-            server_state.write(&safe_args.server_filepath).await?;
-            Ok(warp::http::StatusCode::OK)
+            if state.write(&args.state_filepath).await.is_err() {
+                println!("failed to write state");
+            }
+
+            warp::http::StatusCode::OK
         }
 
         warp::path("config")
             .and(warp::delete())
             .and(warp::body::json())
-            .map(move |request| (request, safe_args.clone(), safe_server_state.clone()))
+            .map(move |request| (request, args.clone(), state.clone()))
             .untuple_one()
-            .and_then(handle)
+            .then(handle)
     }
-}
-
-mod error {
-    pub struct ErrorMessage {
-        message: String,
-    }
-
-    impl std::fmt::Debug for ErrorMessage {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(&self.message)
-        }
-    }
-
-    impl<E: std::error::Error> From<E> for ErrorMessage {
-        fn from(value: E) -> Self {
-            ErrorMessage {
-                message: value.to_string(),
-            }
-        }
-    }
-
-    impl warp::reject::Reject for ErrorMessage {}
 }
