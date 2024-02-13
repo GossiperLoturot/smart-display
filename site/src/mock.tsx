@@ -1,21 +1,18 @@
 export type Mock = {
   apiUrl: string;
   wsUrl: string;
-  cacheUrl: string;
 };
 
 function initMock(): Mock {
   if (process.env.NODE_ENV === "development") {
     const apiUrl = `http://localhost:3000/api`;
     const wsUrl = `ws://localhost:3000/api`;
-    const cacheUrl = `http://localhost:3000/cache`;
-    return { apiUrl, wsUrl, cacheUrl };
+    return { apiUrl, wsUrl };
   }
 
   const apiUrl = `http://${window.location.host}/api`;
   const wsUrl = `ws://${window.location.host}/api`;
-  const cacheUrl = `http://${window.location.host}/cache`;
-  return { apiUrl, wsUrl, cacheUrl };
+  return { apiUrl, wsUrl };
 }
 
 export const mock = initMock();

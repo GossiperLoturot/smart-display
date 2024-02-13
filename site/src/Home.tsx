@@ -17,8 +17,14 @@ import {
 import { mock } from "./mock";
 import "./Home.css";
 
-type HomePageState = { dateTime: string; url?: string };
-type PollingResponse = { dateTime: string; url?: string };
+interface HomePageState {
+  dateTime: string;
+  url?: string;
+}
+interface PollingResponse {
+  dateTime: string;
+  url?: string;
+}
 
 export const HomePage = () => {
   const [state, setState] = createSignal<HomePageState | undefined>();
@@ -60,7 +66,9 @@ export const HomePage = () => {
             </div>
           </div>
           <Show when={state().url}>
-            {(url) => <img src={url()} class="bg" />}
+            {(url) => (
+              <img src={`${mock.apiUrl}/buffer?url=${url()}`} class="bg" />
+            )}
           </Show>
         </>
       )}
