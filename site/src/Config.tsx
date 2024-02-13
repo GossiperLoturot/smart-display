@@ -3,14 +3,21 @@ import { createStore } from "solid-js/store";
 import { mock } from "./mock";
 import "./Config.css";
 
-type PictureIndexResponse = {
+interface PictureIndexResponse {
   durationSecs: number;
   urls: string[];
   url?: string;
-};
-type PictureCreateRequest = { url: string };
-type PictureDeleteRequest = { url: string };
-type PictureApplyRequest = { url?: string; durationSecs?: number };
+}
+interface PictureCreateRequest {
+  url: string;
+}
+interface PictureDeleteRequest {
+  url: string;
+}
+interface PictureApplyRequest {
+  url?: string;
+  durationSecs?: number;
+}
 
 export const ConfigPage = () => {
   const [state, { refetch }] = createResource(async () => {
@@ -81,7 +88,7 @@ export const ConfigPage = () => {
             <div class="head-bottom">
               <div class="item-img-container">
                 <img
-                  src={state().url}
+                  src={`${mock.apiUrl}/buffer?url=${state().url}`}
                   width="100px"
                   height="100px"
                   class="item-img"
@@ -95,7 +102,7 @@ export const ConfigPage = () => {
           <div class="item">
             <div class="item-img-container">
               <img
-                src={pushForm.url}
+                src={`${mock.apiUrl}/buffer?url=${pushForm.url}`}
                 width="100px"
                 height="100px"
                 class="item-img"
@@ -129,7 +136,7 @@ export const ConfigPage = () => {
               <div class="item">
                 <div class="item-img-container">
                   <img
-                    src={state().urls[i()]}
+                    src={`${mock.apiUrl}/buffer?url=${state().urls[i()]}`}
                     width="100px"
                     height="100px"
                     class="item-img"

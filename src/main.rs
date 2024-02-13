@@ -3,23 +3,27 @@ use warp::Filter;
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
+
     let args = args::Args::parse();
     let args = std::sync::Arc::new(args);
 
-    let filepath = &args.state_filepath;
-    let state = match server::State::read(filepath).await {
-        Ok(server_state) => {
-            println!("open server state file {:?}.", filepath);
-            server_state
+    let state = match server::State::read(&args.state_filepath).await {
+        Ok(state) => {
+            tracing::info!("load state file {:?}", args.state_filepath);
+            tracing::info!("use loaded state file");
+            state
         }
         Err(e) => {
-            println!("can't open server state file {:?}.", filepath);
-            println!("{:?}", e);
-            println!("use default server state");
+            tracing::warn!("failed to load state file {:?}", e);
+            tracing::info!("use default state file");
             server::State::default()
         }
     };
     let state = std::sync::Arc::new(tokio::sync::Mutex::new(state));
+
+    let buffer = picture_buffer::Buffer::default();
+    let buffer = std::sync::Arc::new(tokio::sync::Mutex::new(buffer));
 
     let filter = warp::path("api")
         .and(
@@ -27,23 +31,17 @@ async fn main() {
                 .or(picture_index::handle(state.clone()))
                 .or(picture_apply::handle(args.clone(), state.clone()))
                 .or(picture_create::handle(args.clone(), state.clone()))
-                .or(picture_delete::handle(args.clone(), state.clone())),
+                .or(picture_delete::handle(args.clone(), state.clone()))
+                .or(picture_buffer::handle(buffer))
+                .recover(reject::handle),
         )
         .or(warp::fs::dir(args.dist_dirpath.clone()))
-        .or(warp::fs::file(args.dist_filepath.clone()))
-        .with(
-            warp::cors()
-                .allow_any_origin()
-                .allow_methods(["GET", "POST", "DELETE", "PATCH"])
-                .allow_headers(["Content-Type"])
-                .build(),
-        );
+        .or(warp::fs::file(args.dist_filepath.clone()));
 
-    tokio::spawn(async {
-        server::State::run(state).await;
-    });
+    tracing::info!("start background state routine");
+    tokio::spawn(server::run(state));
 
-    println!("listening on {}.", args.address);
+    tracing::info!("start listening {:?}", args.address);
     warp::serve(filter).run(args.address).await;
 }
 
@@ -71,7 +69,7 @@ mod args {
 
 mod server {
     use anyhow::Context;
-    use rand::prelude::*;
+    use rand::{seq::IteratorRandom, SeedableRng};
 
     pub type SyncState = std::sync::Arc<tokio::sync::Mutex<State>>;
 
@@ -100,93 +98,165 @@ mod server {
                 .context("failed to write state to file")?;
             Ok(())
         }
-
-        pub async fn run(state: SyncState) {
-            let mut rng = StdRng::from_entropy();
-            let client = reqwest::Client::new();
-
-            loop {
-                let mut state = state.lock().await;
-
-                match state.update(&mut rng, &client).await {
-                    Ok(()) => println!("update state"),
-                    Err(e) => println!("{}", e),
-                }
-
-                let duration_secs = state.duration_secs;
-
-                drop(state);
-
-                tokio::time::sleep(std::time::Duration::from_secs_f32(duration_secs)).await;
-            }
-        }
-
-        async fn update(
-            &mut self,
-            rng: &mut rand::rngs::StdRng,
-            client: &reqwest::Client,
-        ) -> anyhow::Result<()> {
-            let url = self
-                .url_set
-                .iter()
-                .choose(rng)
-                .cloned()
-                .context("failed to choose image url")?;
-
-            let response = client
-                .get(url)
-                .send()
-                .await
-                .context("failed to http request")?;
-
-            if !response
-                .headers()
-                .get("Content-Type")
-                .map(|value| value.as_bytes().starts_with(b"image/"))
-                .unwrap_or_default()
-            {
-                anyhow::bail!("invalid Content-Type");
-            }
-
-            let bytes = response
-                .bytes()
-                .await
-                .context("failed to read http response body")?;
-
-            let img =
-                image::load_from_memory(&bytes).context("failed to load image from response")?;
-            let col = compute_repr_color(&img.to_rgb8());
-
-            let mut buf = std::io::Cursor::new(vec![]);
-            img.write_to(&mut buf, image::ImageFormat::WebP)
-                .context("failed to save webp from image")?;
-            let vec = buf.into_inner();
-
-            println!("{:?}, {}", col, vec.len());
-
-            Ok(())
-        }
     }
 
     impl Default for State {
         fn default() -> Self {
             Self {
                 duration_secs: 60.0,
-                url_set: std::collections::HashSet::new(),
-                current_url: None,
+                url_set: Default::default(),
+                current_url: Default::default(),
             }
         }
     }
 
-    fn compute_repr_color(img: &image::RgbImage) -> image::Rgb<u8> {
-        let pixel_len = img.len() / 3;
-        let r = img.iter().step_by(3);
-        let g = img.iter().skip(1).step_by(3);
-        let b = img.iter().skip(2).step_by(3);
-        let avg_r = (r.fold(0, |acc, x| acc + *x as usize) / pixel_len) as u8;
-        let avg_g = (g.fold(0, |acc, x| acc + *x as usize) / pixel_len) as u8;
-        let avg_b = (b.fold(0, |acc, x| acc + *x as usize) / pixel_len) as u8;
-        image::Rgb([avg_r, avg_g, avg_b])
+    pub async fn run(state: SyncState) {
+        let mut rng = rand::rngs::StdRng::from_entropy();
+
+        loop {
+            let mut state = state.lock().await;
+
+            if let Some(url) = state.url_set.iter().choose(&mut rng) {
+                tracing::debug!("set current url {:?}", url);
+                state.current_url = Some(url.clone());
+            }
+
+            let duration_secs = state.duration_secs;
+
+            drop(state);
+
+            tokio::time::sleep(std::time::Duration::from_secs_f32(duration_secs)).await;
+        }
+    }
+}
+
+mod picture_buffer {
+    use anyhow::Context;
+    use warp::Filter;
+
+    use crate::reject;
+
+    type SyncBuffer = std::sync::Arc<tokio::sync::Mutex<Buffer>>;
+
+    struct ImageEntry {
+        bytes: Vec<u8>,
+        rgb: [u8; 3],
+    }
+
+    pub struct Buffer {
+        client: reqwest::Client,
+        images: std::collections::HashMap<String, ImageEntry>,
+    }
+
+    impl Default for Buffer {
+        fn default() -> Self {
+            Self {
+                client: Default::default(),
+                images: Default::default(),
+            }
+        }
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Request {
+        url: String,
+    }
+
+    pub fn handle(
+        buffer: SyncBuffer,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        async fn handle(
+            request: Request,
+            buffer: SyncBuffer,
+        ) -> Result<impl warp::Reply, warp::Rejection> {
+            tracing::info!("hit picture buffer {:?}", request);
+
+            let mut buffer = buffer.lock().await;
+
+            let image = match buffer.images.get(&request.url) {
+                Some(image) => {
+                    tracing::debug!("use cache image {:?}", request.url);
+                    image
+                }
+                None => {
+                    tracing::info!("buffer image {:?}", request.url);
+                    let image = buffering(&buffer.client, &request.url)
+                        .await
+                        .map_err(reject::to)?;
+
+                    tracing::debug!("create cache image {:?}", request.url);
+                    buffer.images.entry(request.url).or_insert(image)
+                }
+            };
+
+            let response = warp::http::Response::builder()
+                .status(200)
+                .header("Content-Type", "image/jpeg")
+                .header("X-Repr-R", image.rgb[0].to_string())
+                .header("X-Repr-G", image.rgb[1].to_string())
+                .header("X-Repr-B", image.rgb[2].to_string())
+                .body(image.bytes.clone())
+                .context("failed to create http response for reply")
+                .map_err(reject::to)?;
+
+            Ok(response)
+        }
+
+        warp::path("buffer")
+            .and(warp::get())
+            .and(warp::query::<Request>())
+            .map(move |request| (request, buffer.clone()))
+            .untuple_one()
+            .and_then(handle)
+    }
+
+    async fn buffering(client: &reqwest::Client, url: &str) -> anyhow::Result<ImageEntry> {
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .context("failed to get http response")?;
+
+        let is_image = response
+            .headers()
+            .get("Content-Type")
+            .map(|value| value.as_bytes().starts_with(b"image/"))
+            .unwrap_or_default();
+
+        anyhow::ensure!(is_image, "http content type must be image/*");
+
+        let bytes = response
+            .bytes()
+            .await
+            .context("failed to get http response body")?;
+        let image = image::load_from_memory(&bytes)
+            .context("failed to load image from http response body")?;
+
+        let mut buf = std::io::Cursor::new(vec![]);
+        image
+            .write_to(&mut buf, image::ImageFormat::Jpeg)
+            .context("failed to encode into jpeg from image")?;
+        let bytes = buf.into_inner();
+
+        let rgb = compute_repr_rgb(image).await.0;
+
+        Ok(ImageEntry { bytes, rgb })
+    }
+
+    async fn compute_repr_rgb(image: image::DynamicImage) -> image::Rgb<u8> {
+        let pixels = image.to_rgb8();
+        let pixels_len = pixels.len() / 3;
+
+        let r_iter = pixels.iter().step_by(3);
+        let g_iter = pixels.iter().skip(1).step_by(3);
+        let b_iter = pixels.iter().skip(2).step_by(3);
+
+        let r = (r_iter.fold(0, |acc, r| acc + *r as usize) / pixels_len) as u8;
+        let g = (g_iter.fold(0, |acc, g| acc + *g as usize) / pixels_len) as u8;
+        let b = (b_iter.fold(0, |acc, b| acc + *b as usize) / pixels_len) as u8;
+
+        image::Rgb([r, g, b])
     }
 }
 
@@ -207,7 +277,7 @@ mod polling {
         state: server::SyncState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         async fn ws_handle(ws: warp::ws::WebSocket, state: server::SyncState) {
-            println!("connect websocket transaction.");
+            tracing::info!("established websocket connection");
 
             let (mut tx, mut rx) = ws.split();
 
@@ -219,8 +289,22 @@ mod polling {
                     url: state.current_url.clone(),
                 };
 
-                let message = warp::ws::Message::text(serde_json::to_string(&response).unwrap());
-                let _ = tx.send(message).await;
+                match serde_json::to_string(&response) {
+                    Ok(text) => {
+                        let message = warp::ws::Message::text(text);
+                        match tx.send(message).await {
+                            Ok(_) => {
+                                tracing::debug!("success to send message");
+                            }
+                            Err(e) => {
+                                tracing::warn!("failed to send message {:?}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to serialize {:?}", e);
+                    }
+                }
             }
         }
 
@@ -249,7 +333,7 @@ mod picture_index {
         state: server::SyncState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         async fn handle(state: server::SyncState) -> impl warp::Reply {
-            println!("request picture index.");
+            tracing::info!("hit picture index");
 
             let state = state.lock().await;
 
@@ -272,9 +356,9 @@ mod picture_index {
 mod picture_apply {
     use warp::Filter;
 
-    use crate::{args, server};
+    use crate::{args, reject, server};
 
-    #[derive(serde::Deserialize)]
+    #[derive(Debug, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Request {
         duration_secs: Option<f32>,
@@ -289,26 +373,27 @@ mod picture_apply {
             request: Request,
             args: args::SyncArgs,
             state: server::SyncState,
-        ) -> impl warp::Reply {
-            println!("apply picture {:?}.", request.url);
+        ) -> Result<impl warp::Reply, warp::Rejection> {
+            tracing::info!("hit picture apply {:?}", request);
 
             let mut state = state.lock().await;
 
             if let Some(url) = request.url {
-                println!("change current url");
+                tracing::info!("set current url {:?}", url);
                 state.current_url = Some(url);
             }
 
             if let Some(duration_secs) = request.duration_secs {
-                println!("change duration secs");
+                tracing::info!("set duration secs {:?}", duration_secs);
                 state.duration_secs = duration_secs;
             }
 
-            if state.write(&args.state_filepath).await.is_err() {
-                println!("failed to write state");
-            }
+            state
+                .write(&args.state_filepath)
+                .await
+                .map_err(reject::to)?;
 
-            warp::http::StatusCode::OK
+            Ok(warp::http::StatusCode::OK)
         }
 
         warp::path("config")
@@ -316,16 +401,16 @@ mod picture_apply {
             .and(warp::body::json())
             .map(move |request| (request, args.clone(), state.clone()))
             .untuple_one()
-            .then(handle)
+            .and_then(handle)
     }
 }
 
 mod picture_create {
     use warp::Filter;
 
-    use crate::{args, server};
+    use crate::{args, reject, server};
 
-    #[derive(serde::Deserialize)]
+    #[derive(Debug, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Request {
         url: String,
@@ -339,18 +424,20 @@ mod picture_create {
             request: Request,
             args: args::SyncArgs,
             state: server::SyncState,
-        ) -> impl warp::Reply {
-            println!("create picture {:?}.", request.url);
+        ) -> Result<impl warp::Reply, warp::Rejection> {
+            tracing::info!("hit picture create {:?}", request);
 
             let mut state = state.lock().await;
 
+            tracing::info!("insert url {:?}", request.url);
             state.url_set.insert(request.url);
 
-            if state.write(&args.state_filepath).await.is_err() {
-                println!("failed to write state");
-            }
+            state
+                .write(&args.state_filepath)
+                .await
+                .map_err(reject::to)?;
 
-            warp::http::StatusCode::OK
+            Ok(warp::http::StatusCode::OK)
         }
 
         warp::path("config")
@@ -358,16 +445,16 @@ mod picture_create {
             .and(warp::body::json())
             .map(move |request| (request, args.clone(), state.clone()))
             .untuple_one()
-            .then(handle)
+            .and_then(handle)
     }
 }
 
 mod picture_delete {
     use warp::Filter;
 
-    use crate::{args, server};
+    use crate::{args, reject, server};
 
-    #[derive(serde::Deserialize)]
+    #[derive(Debug, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Request {
         url: String,
@@ -381,18 +468,20 @@ mod picture_delete {
             request: Request,
             args: args::SyncArgs,
             state: server::SyncState,
-        ) -> impl warp::Reply {
-            println!("delete picture {:?}.", request.url);
+        ) -> Result<impl warp::Reply, warp::Rejection> {
+            tracing::info!("hit picture delete {:?}", request);
 
             let mut state = state.lock().await;
 
+            tracing::info!("remove url {:?}", request.url);
             state.url_set.remove(&request.url);
 
-            if state.write(&args.state_filepath).await.is_err() {
-                println!("failed to write state");
-            }
+            state
+                .write(&args.state_filepath)
+                .await
+                .map_err(reject::to)?;
 
-            warp::http::StatusCode::OK
+            Ok(warp::http::StatusCode::OK)
         }
 
         warp::path("config")
@@ -400,6 +489,47 @@ mod picture_delete {
             .and(warp::body::json())
             .map(move |request| (request, args.clone(), state.clone()))
             .untuple_one()
-            .then(handle)
+            .and_then(handle)
+    }
+}
+
+mod reject {
+    #[derive(Debug)]
+    pub struct Rejection(anyhow::Error);
+
+    pub fn to(value: anyhow::Error) -> Rejection {
+        Rejection(value)
+    }
+
+    impl warp::reject::Reject for Rejection {}
+
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Response {
+        status_code: u16,
+        message: String,
+    }
+
+    pub async fn handle(e: warp::Rejection) -> Result<impl warp::Reply, std::convert::Infallible> {
+        let status_code;
+        let message;
+
+        if e.is_not_found() {
+            status_code = warp::http::StatusCode::NOT_FOUND;
+            message = "NOT_FOUND".to_string();
+        } else if let Some(e) = e.find::<Rejection>() {
+            status_code = warp::http::StatusCode::BAD_REQUEST;
+            message = e.0.to_string();
+        } else {
+            status_code = warp::http::StatusCode::INTERNAL_SERVER_ERROR;
+            message = "UNHANDLED_REJECTION".to_string();
+        }
+
+        let response = Response {
+            status_code: status_code.as_u16(),
+            message,
+        };
+
+        Ok(warp::reply::json(&response))
     }
 }
