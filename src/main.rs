@@ -14,8 +14,8 @@ async fn main() {
             tracing::info!("use loaded state file");
             state
         }
-        Err(e) => {
-            tracing::warn!("failed to load state file {:?}", e);
+        Err(err) => {
+            tracing::warn!("failed to load state file {:?}", err);
             tracing::info!("use default state file");
             server::State::default()
         }
@@ -39,7 +39,8 @@ async fn main() {
         .or(warp::fs::file(args.dist_filepath.clone()));
 
     tracing::info!("start background state routine");
-    tokio::spawn(server::run(state));
+    tokio::spawn(server::run_picture_shuffle(state.clone()));
+    tokio::spawn(server::run_sensor_fetch(args.clone(), state));
 
     tracing::info!("start listening {:?}", args.address);
     warp::serve(filter).run(args.address).await;
@@ -64,12 +65,20 @@ mod args {
         pub dist_filepath: std::path::PathBuf,
         #[arg(long)]
         pub address: std::net::SocketAddr,
+        #[arg(long)]
+        pub sensor: bool,
+        #[arg(long, required_if_eq("sensor", "true"))]
+        pub sensor_filepath: Option<std::path::PathBuf>,
+        #[arg(long, required_if_eq("sensor", "true"))]
+        pub sensor_duration: Option<f32>,
     }
 }
 
 mod server {
     use anyhow::Context;
     use rand::{seq::IteratorRandom, SeedableRng};
+
+    use crate::args;
 
     pub type SyncState = std::sync::Arc<tokio::sync::Mutex<State>>;
 
@@ -78,7 +87,13 @@ mod server {
     pub struct State {
         pub duration_secs: f32,
         pub url_set: std::collections::HashSet<String>,
-        pub current_url: Option<String>,
+
+        #[serde(skip)]
+        pub url: Option<String>,
+        #[serde(skip)]
+        pub temperature: Option<f32>,
+        #[serde(skip)]
+        pub humidity: Option<f32>,
     }
 
     impl State {
@@ -104,24 +119,62 @@ mod server {
         fn default() -> Self {
             Self {
                 duration_secs: 60.0,
-                url_set: Default::default(),
-                current_url: Default::default(),
+                url_set: std::collections::HashSet::new(),
+
+                url: None,
+                temperature: None,
+                humidity: None,
             }
         }
     }
 
-    pub async fn run(state: SyncState) {
+    pub async fn run_picture_shuffle(state: SyncState) {
         let mut rng = rand::rngs::StdRng::from_entropy();
 
         loop {
             let mut state = state.lock().await;
 
-            if let Some(url) = state.url_set.iter().choose(&mut rng) {
-                tracing::debug!("set current url {:?}", url);
-                state.current_url = Some(url.clone());
+            match state.url_set.iter().choose(&mut rng) {
+                Some(url) => {
+                    tracing::debug!("success to set picture url {:?}", url);
+                    state.url = Some(url.clone());
+                }
+                None => {
+                    tracing::debug!("failed to set picture url");
+                }
             }
 
             let duration_secs = state.duration_secs;
+
+            drop(state);
+
+            tokio::time::sleep(std::time::Duration::from_secs_f32(duration_secs)).await;
+        }
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct SensorContent {
+        temperature: f32,
+        humidity: f32,
+    }
+
+    pub async fn run_sensor_fetch(args: args::SyncArgs, state: SyncState) -> anyhow::Result<()> {
+        let filepath = args
+            .sensor_filepath
+            .as_ref()
+            .context("no parse sensor filepath")?;
+        let duration_secs = args.sensor_duration.context("no parse sensor duration")?;
+
+        loop {
+            let file = std::fs::File::open(filepath)?;
+            let content = serde_json::from_reader::<_, SensorContent>(file)?;
+
+            tracing::debug!("read sensor content {:?}", content);
+
+            let mut state = state.lock().await;
+
+            state.temperature = Some(content.temperature);
+            state.humidity = Some(content.humidity);
 
             drop(state);
 
@@ -151,8 +204,8 @@ mod picture_buffer {
     impl Default for Buffer {
         fn default() -> Self {
             Self {
-                client: Default::default(),
-                images: Default::default(),
+                client: reqwest::Client::new(),
+                images: std::collections::HashMap::new(),
             }
         }
     }
@@ -271,6 +324,8 @@ mod polling {
     struct Response {
         date_time: chrono::DateTime<chrono::Local>,
         url: Option<String>,
+        temperature: Option<f32>,
+        humidity: Option<f32>,
     }
 
     pub fn handle(
@@ -286,7 +341,9 @@ mod polling {
 
                 let response = Response {
                     date_time: chrono::Local::now(),
-                    url: state.current_url.clone(),
+                    url: state.url.clone(),
+                    temperature: state.temperature,
+                    humidity: state.humidity,
                 };
 
                 match serde_json::to_string(&response) {
@@ -296,13 +353,13 @@ mod polling {
                             Ok(_) => {
                                 tracing::debug!("success to send message");
                             }
-                            Err(e) => {
-                                tracing::warn!("failed to send message {:?}", e);
+                            Err(err) => {
+                                tracing::warn!("failed to send message {:?}", err);
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("failed to serialize {:?}", e);
+                    Err(err) => {
+                        tracing::warn!("failed to serialize {:?}", err);
                     }
                 }
             }
@@ -340,7 +397,7 @@ mod picture_index {
             let response = Response {
                 duration_secs: state.duration_secs,
                 urls: state.url_set.iter().cloned().collect::<Vec<_>>(),
-                url: state.current_url.clone(),
+                url: state.url.clone(),
             };
 
             warp::reply::json(&response)
@@ -380,7 +437,7 @@ mod picture_apply {
 
             if let Some(url) = request.url {
                 tracing::info!("set current url {:?}", url);
-                state.current_url = Some(url);
+                state.url = Some(url);
             }
 
             if let Some(duration_secs) = request.duration_secs {
@@ -510,16 +567,18 @@ mod reject {
         message: String,
     }
 
-    pub async fn handle(e: warp::Rejection) -> Result<impl warp::Reply, std::convert::Infallible> {
+    pub async fn handle(
+        err: warp::Rejection,
+    ) -> Result<impl warp::Reply, std::convert::Infallible> {
         let status_code;
         let message;
 
-        if e.is_not_found() {
+        if err.is_not_found() {
             status_code = warp::http::StatusCode::NOT_FOUND;
             message = "NOT_FOUND".to_string();
-        } else if let Some(e) = e.find::<Rejection>() {
+        } else if let Some(err) = err.find::<Rejection>() {
             status_code = warp::http::StatusCode::BAD_REQUEST;
-            message = e.0.to_string();
+            message = err.0.to_string();
         } else {
             status_code = warp::http::StatusCode::INTERNAL_SERVER_ERROR;
             message = "UNHANDLED_REJECTION".to_string();
