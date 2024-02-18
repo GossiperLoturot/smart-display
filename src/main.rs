@@ -36,7 +36,14 @@ async fn main() {
                 .recover(reject::handle),
         )
         .or(warp::fs::dir(args.dist_dirpath.clone()))
-        .or(warp::fs::file(args.dist_filepath.clone()));
+        .or(warp::fs::file(args.dist_filepath.clone()))
+        .with(
+            warp::cors()
+                .allow_any_origin()
+                .allow_methods(["GET", "POST", "DELETE", "PATCH"])
+                .allow_headers(["Content-Type"])
+                .build(),
+        );
 
     tracing::info!("start background state routine");
     tokio::spawn(server::run_picture_shuffle(state.clone()));

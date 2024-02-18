@@ -8,12 +8,15 @@ interface PictureIndexResponse {
   urls: string[];
   url?: string;
 }
+
 interface PictureCreateRequest {
   url: string;
 }
+
 interface PictureDeleteRequest {
   url: string;
 }
+
 interface PictureApplyRequest {
   url?: string;
   durationSecs?: number;

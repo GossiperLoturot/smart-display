@@ -20,10 +20,15 @@ import "./Home.css";
 interface HomePageState {
   dateTime: string;
   url?: string;
+  temperature?: number;
+  humidity?: number;
 }
+
 interface PollingResponse {
   dateTime: string;
   url?: string;
+  temperature?: number;
+  humidity?: number;
 }
 
 export const HomePage = () => {
@@ -56,52 +61,31 @@ export const HomePage = () => {
   }, []);
 
   return (
-    <Show when={state()} fallback={<div>Loading</div>}>
+    <Show when={state()}>
       {(state) => (
         <>
-          <div class="container-outer">
-            <div class="container-inner">
-              <ClockComponent dateTime={() => new Date(state().dateTime)} />
-              <ProgressComponent dateTime={() => new Date(state().dateTime)} />
-            </div>
-          </div>
-          <Show when={state().url}>
-            {(url) => (
-              <img src={`${mock.apiUrl}/buffer?url=${url()}`} class="bg" />
-            )}
-          </Show>
+          <InnerComponent state={state()} />
+          <BgComponent state={state()} />
         </>
       )}
     </Show>
   );
 };
 
-const ClockComponent = ({ dateTime }: { dateTime: () => Date }) => {
-  const clock = createMemo(() => {
-    const now = dateTime();
-    return {
-      date: format(now, "yyyy/MM/dd eeee, BBBB"),
-      time: format(now, "HH:mm:ss"),
-      meta: format(now, "QQQQ, OOOO"),
-    };
-  });
+const InnerComponent = (props: { state: HomePageState }) => {
+  const memo = createMemo(() => {
+    const now = new Date(props.state.dateTime);
 
-  return (
-    <div class="clock">
-      <div class="clock-date">{clock().date}</div>
-      <div class="clock-time">{clock().time}</div>
-      <div class="clock-meta">{clock().meta}</div>
-    </div>
-  );
-};
+    const date = format(now, "yyyy/MM/dd eeee, BBBB");
+    const time = format(now, "HH:mm:ss");
+    let meta = format(now, "QQQQ, OOOO");
 
-const ProgressComponent = ({ dateTime }: { dateTime: () => Date }) => {
-  function threshold(x: number, start: number, end: number) {
-    return (x - start) / (end - start);
-  }
-
-  const progress = createMemo(() => {
-    const now = dateTime();
+    if (props.state.temperature) {
+      meta = meta.concat(`, ${props.state.temperature}°C`);
+    }
+    if (props.state.humidity) {
+      meta = meta.concat(`, ${props.state.humidity}%RH`);
+    }
 
     const day = threshold(
       now.valueOf(),
@@ -119,47 +103,49 @@ const ProgressComponent = ({ dateTime }: { dateTime: () => Date }) => {
       endOfYear(now).valueOf(),
     );
 
-    return { day, month, year };
+    return { date, time, meta, day, month, year };
   });
 
   return (
-    <div class="progress">
-      <div class="progress-day">
-        <div class="progress-label">Day</div>
-        <div class="progress-value">{`${(progress().day * 100.0).toFixed(
-          1,
-        )}%`}</div>
-        <div class="progress-barouter">
-          <div
-            class="progress-barinner"
-            style={`width:${progress().day * 100.0}%`}
-          />
-        </div>
-      </div>
-      <div class="progress-month">
-        <div class="progress-label">Month</div>
-        <div class="progress-value">{`${(progress().month * 100.0).toFixed(
-          1,
-        )}%`}</div>
-        <div class="progress-barouter">
-          <div
-            class="progress-barinner"
-            style={`width:${progress().month * 100.0}%`}
-          />
-        </div>
-      </div>
-      <div class="progress-year">
-        <div class="progress-label">Year</div>
-        <div class="progress-value">{`${(progress().year * 100.0).toFixed(
-          1,
-        )}%`}</div>
-        <div class="progress-barouter">
-          <div
-            class="progress-barinner"
-            style={`width:${progress().year * 100.0}%`}
-          />
-        </div>
+    <div class="container-outer">
+      <div class="container-inner">
+        <div class="clock-date">{memo().date}</div>
+        <div class="clock-time">{memo().time}</div>
+        <div class="clock-meta">{memo().meta}</div>
+
+        <div class="gap"></div>
+
+        <BarComponent label="Day" value={memo().day} />
+        <BarComponent label="Month" value={memo().month} />
+        <BarComponent label="Year" value={memo().year} />
       </div>
     </div>
   );
 };
+
+const BarComponent = (props: { label: string; value: number }) => {
+  return (
+    <div class="progress">
+      <div class="progress-label">{props.label}</div>
+      <div class="progress-value">{`${(props.value * 100.0).toFixed(1)}%`}</div>
+      <div class="progress-bar-outer">
+        <div
+          class="progress-bar-inner"
+          style={`width:${props.value * 100.0}%`}
+        ></div>
+      </div>
+    </div>
+  );
+};
+
+const BgComponent = (props: { state: HomePageState }) => {
+  return (
+    <Show when={props.state.url}>
+      {(url) => <img src={`${mock.apiUrl}/buffer?url=${url()}`} class="bg" />}
+    </Show>
+  );
+};
+
+function threshold(x: number, start: number, end: number) {
+  return (x - start) / (end - start);
+}
