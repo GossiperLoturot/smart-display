@@ -151,11 +151,11 @@ mod server {
                 }
             }
 
-            let duration_secs = state.duration_secs;
+            let duration_secs = std::time::Duration::from_secs_f32(state.duration_secs);
 
             drop(state);
 
-            tokio::time::sleep(std::time::Duration::from_secs_f32(duration_secs)).await;
+            tokio::time::sleep(duration_secs).await;
         }
     }
 
@@ -165,18 +165,53 @@ mod server {
         humidity: f32,
     }
 
-    pub async fn run_sensor_fetch(args: args::SyncArgs, state: SyncState) -> anyhow::Result<()> {
-        let filepath = args
-            .sensor_filepath
-            .as_ref()
-            .context("no parse sensor filepath")?;
-        let duration_secs = args.sensor_duration.context("no parse sensor duration")?;
+    pub async fn run_sensor_fetch(args: args::SyncArgs, state: SyncState) {
+        let filepath = match args.sensor_filepath.as_ref() {
+            Some(filepath) => {
+                tracing::info!("parse sensor filepath {:?}", filepath);
+                filepath
+            }
+            None => {
+                tracing::info!("no parse sensor filepath");
+                return;
+            }
+        };
+
+        let duration_secs = match args.sensor_duration {
+            Some(duration_secs) => {
+                tracing::info!("parse sensor duration {:?}", duration_secs);
+                std::time::Duration::from_secs_f32(duration_secs)
+            }
+            None => {
+                tracing::info!("no parse sensor duration");
+                return;
+            }
+        };
 
         loop {
-            let file = std::fs::File::open(filepath)?;
-            let content = serde_json::from_reader::<_, SensorContent>(file)?;
+            let file = match std::fs::File::open(filepath) {
+                Ok(file) => {
+                    tracing::debug!("success to read sensor file {:?}", filepath);
+                    file
+                }
+                Err(err) => {
+                    tracing::warn!("failed to read sensor file {:?}", err);
+                    tokio::time::sleep(duration_secs).await;
+                    continue;
+                }
+            };
 
-            tracing::debug!("read sensor content {:?}", content);
+            let content = match serde_json::from_reader::<_, SensorContent>(file) {
+                Ok(content) => {
+                    tracing::debug!("success to parse sensor content {:?}", content);
+                    content
+                }
+                Err(err) => {
+                    tracing::warn!("failed to parse sensor content {:?}", err);
+                    tokio::time::sleep(duration_secs).await;
+                    continue;
+                }
+            };
 
             let mut state = state.lock().await;
 
@@ -185,7 +220,7 @@ mod server {
 
             drop(state);
 
-            tokio::time::sleep(std::time::Duration::from_secs_f32(duration_secs)).await;
+            tokio::time::sleep(duration_secs).await;
         }
     }
 }
