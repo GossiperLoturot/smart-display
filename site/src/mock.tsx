@@ -1,7 +1,7 @@
-export type Mock = {
+export interface Mock {
   apiUrl: string;
   wsUrl: string;
-};
+}
 
 function initMock(): Mock {
   if (process.env.NODE_ENV === "development") {
