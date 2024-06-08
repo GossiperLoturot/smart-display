@@ -1,20 +1,23 @@
 {
   "name": "smart-display",
   "version": "0.1.0",
-  "type": "module",
+  "description": "A web server that provides simple websites for digital signage",
+  "license": "(MIT AND Apache-2.0)",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "fmt": "biome format ./src --write"
+    "check": "biome check --write",
+    "check-unsafe": "biome check --write --unsafe"
   },
   "devDependencies": {
-    "@solidjs/router": "^0",
-    "date-fns": "^2",
-    "@biomejs/biome": "^1",
-    "solid-js": "^1",
-    "typescript": "^5",
-    "vite": "^5",
-    "vite-plugin-solid": "^2"
-  }
+    "@solidjs/router": "^0.13.5",
+    "date-fns": "^2.30.0",
+    "@biomejs/biome": "^1.8.0",
+    "solid-js": "^1.8.17",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.13",
+    "vite-plugin-solid": "^2.10.2"
+  },
+  "type": "module"
 }

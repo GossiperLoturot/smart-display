@@ -1,18 +1,15 @@
 /* @refresh reload */
-
 import { render } from "solid-js/web";
-import { Route, Router } from "@solidjs/router";
-import { HomePage } from "./Home";
-import { ConfigPage } from "./Config";
+
+import { App } from "./app";
 
 const root = document.getElementById("root");
 
-render(
-  () => (
-    <Router>
-      <Route path="/" component={HomePage} />
-      <Route path="/config" component={ConfigPage} />
-    </Router>
-  ),
-  root!,
-);
+if (import.meta.env.DEV && !(root instanceof HTMLElement)) {
+  throw new Error(
+    "Root element not found. Did you forget to add it to your index.html? Or maybe the id attribute got misspelled?",
+  );
+}
+
+// biome-ignore lint/style/noNonNullAssertion: expected non null value.
+render(() => <App />, root!);

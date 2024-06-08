@@ -1,58 +1,6 @@
 use clap::Parser;
 use warp::Filter;
 
-#[tokio::main]
-async fn main() {
-    tracing_subscriber::fmt::init();
-
-    let args = args::Args::parse();
-    let args = std::sync::Arc::new(args);
-
-    let state = match server::State::read(&args.state_filepath).await {
-        Ok(state) => {
-            tracing::info!("load state file {:?}", args.state_filepath);
-            tracing::info!("use loaded state file");
-            state
-        }
-        Err(err) => {
-            tracing::warn!("failed to load state file {:?}", err);
-            tracing::info!("use default state file");
-            server::State::default()
-        }
-    };
-    let state = std::sync::Arc::new(tokio::sync::Mutex::new(state));
-
-    let buffer = picture_buffer::Buffer::default();
-    let buffer = std::sync::Arc::new(tokio::sync::Mutex::new(buffer));
-
-    let filter = warp::path("api")
-        .and(
-            polling::handle(state.clone())
-                .or(picture_index::handle(state.clone()))
-                .or(picture_apply::handle(args.clone(), state.clone()))
-                .or(picture_create::handle(args.clone(), state.clone()))
-                .or(picture_delete::handle(args.clone(), state.clone()))
-                .or(picture_buffer::handle(buffer))
-                .recover(reject::handle),
-        )
-        .or(warp::fs::dir(args.dist_dirpath.clone()))
-        .or(warp::fs::file(args.dist_filepath.clone()))
-        .with(
-            warp::cors()
-                .allow_any_origin()
-                .allow_methods(["GET", "POST", "DELETE", "PATCH"])
-                .allow_headers(["Content-Type"])
-                .build(),
-        );
-
-    tracing::info!("start background state routine");
-    tokio::spawn(server::run_picture_shuffle(state.clone()));
-    tokio::spawn(server::run_sensor_fetch(args.clone(), state));
-
-    tracing::info!("start listening {:?}", args.address);
-    warp::serve(filter).run(args.address).await;
-}
-
 mod args {
     pub type SyncArgs = std::sync::Arc<Args>;
 
@@ -67,25 +15,70 @@ mod args {
         #[arg(long)]
         pub state_filepath: std::path::PathBuf,
         #[arg(long)]
-        pub dist_dirpath: std::path::PathBuf,
-        #[arg(long)]
-        pub dist_filepath: std::path::PathBuf,
-        #[arg(long)]
         pub address: std::net::SocketAddr,
+        #[arg(long, default_value_t = 800)]
+        pub image_width: u32,
+        #[arg(long, default_value_t = 480)]
+        pub image_height: u32,
         #[arg(long)]
         pub sensor: bool,
         #[arg(long, required_if_eq("sensor", "true"))]
         pub sensor_filepath: Option<std::path::PathBuf>,
         #[arg(long, required_if_eq("sensor", "true"))]
-        pub sensor_duration: Option<f32>,
+        pub sensor_duration_secs: Option<f32>,
     }
 }
 
-mod server {
-    use anyhow::Context;
-    use rand::{seq::IteratorRandom, SeedableRng};
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt::init();
 
+    let args = args::Args::parse();
+    let args = std::sync::Arc::new(args);
+
+    let state = match state::State::read_from_file(&args.state_filepath).await {
+        Ok(state) => {
+            tracing::info!("load state file {:?}", args.state_filepath);
+            tracing::info!("use loaded state file");
+            state
+        }
+        Err(err) => {
+            tracing::warn!("failed to load state file {:?}", err);
+            tracing::info!("use default state file");
+            state::State::new()
+        }
+    };
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(state));
+
+    let image_buffer = image_buffer::ImageBuffer::new();
+    let image_buffer = std::sync::Arc::new(tokio::sync::Mutex::new(image_buffer));
+
+    let filter = polling::handle(state.clone())
+        .or(image_index::handle(state.clone()))
+        .or(image_modify::handle(args.clone(), state.clone()))
+        .or(image_create::handle(args.clone(), state.clone()))
+        .or(image_delete::handle(args.clone(), state.clone()))
+        .or(image_buffer::handle(args.clone(), image_buffer.clone()))
+        .recover(reject::handle)
+        .with(
+            warp::cors()
+                .allow_any_origin()
+                .allow_methods(["GET", "POST"])
+                .allow_headers(["Content-Type"])
+                .build(),
+        );
+
+    tracing::info!("start background state routine");
+    tokio::spawn(state::image_shuffling_loop(state.clone()));
+    tokio::spawn(state::sensor_fething_loop(args.clone(), state));
+
+    tracing::info!("start listening {:?}", args.address);
+    warp::serve(filter).run(args.address).await;
+}
+
+mod state {
     use crate::args;
+    use anyhow::Context;
 
     pub type SyncState = std::sync::Arc<tokio::sync::Mutex<State>>;
 
@@ -93,10 +86,9 @@ mod server {
     #[serde(rename_all = "camelCase")]
     pub struct State {
         pub duration_secs: f32,
-        pub url_set: std::collections::HashSet<String>,
-
+        pub image_urls: std::collections::HashSet<String>,
         #[serde(skip)]
-        pub url: Option<String>,
+        pub image_url: Option<String>,
         #[serde(skip)]
         pub temperature: Option<f32>,
         #[serde(skip)]
@@ -104,8 +96,18 @@ mod server {
     }
 
     impl State {
-        pub async fn read(filepath: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
-            let buf = tokio::fs::read(filepath)
+        pub fn new() -> Self {
+            Self {
+                duration_secs: 60.0,
+                image_urls: Default::default(),
+                image_url: Default::default(),
+                temperature: Default::default(),
+                humidity: Default::default(),
+            }
+        }
+
+        pub async fn read_from_file(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
+            let buf = tokio::fs::read(path)
                 .await
                 .context("failed to read state from file")?;
             let slf =
@@ -113,41 +115,29 @@ mod server {
             Ok(slf)
         }
 
-        pub async fn write(&self, filepath: impl AsRef<std::path::Path>) -> anyhow::Result<()> {
+        pub async fn write_to_file(&self, path: impl AsRef<std::path::Path>) -> anyhow::Result<()> {
             let buf = serde_json::to_vec(self).context("failed to serialize state to json")?;
-            tokio::fs::write(filepath, buf)
+            tokio::fs::write(path, buf)
                 .await
                 .context("failed to write state to file")?;
             Ok(())
         }
     }
 
-    impl Default for State {
-        fn default() -> Self {
-            Self {
-                duration_secs: 60.0,
-                url_set: std::collections::HashSet::new(),
-
-                url: None,
-                temperature: None,
-                humidity: None,
-            }
-        }
-    }
-
-    pub async fn run_picture_shuffle(state: SyncState) {
+    pub async fn image_shuffling_loop(state: SyncState) {
+        use rand::SeedableRng;
         let mut rng = rand::rngs::StdRng::from_entropy();
 
         loop {
             let mut state = state.lock().await;
 
-            match state.url_set.iter().choose(&mut rng) {
-                Some(url) => {
-                    tracing::debug!("success to set picture url {:?}", url);
-                    state.url = Some(url.clone());
+            match rand::seq::IteratorRandom::choose(state.image_urls.iter(), &mut rng) {
+                Some(image_url) => {
+                    tracing::debug!("success to set image url {:?}", image_url);
+                    state.image_url = Some(image_url.clone());
                 }
                 None => {
-                    tracing::debug!("failed to set picture url");
+                    tracing::debug!("failed to set image url");
                 }
             }
 
@@ -160,38 +150,38 @@ mod server {
     }
 
     #[derive(Debug, serde::Deserialize)]
-    struct SensorContent {
+    struct SensorData {
         temperature: f32,
         humidity: f32,
     }
 
-    pub async fn run_sensor_fetch(args: args::SyncArgs, state: SyncState) {
-        let filepath = match args.sensor_filepath.as_ref() {
-            Some(filepath) => {
-                tracing::info!("parse sensor filepath {:?}", filepath);
-                filepath
+    pub async fn sensor_fething_loop(args: args::SyncArgs, state: SyncState) {
+        let path = match args.sensor_filepath.as_ref() {
+            Some(path) => {
+                tracing::info!("parse sensor file path {:?}", path);
+                path
             }
             None => {
-                tracing::info!("no parse sensor filepath");
+                tracing::info!("no sensor file path");
                 return;
             }
         };
 
-        let duration_secs = match args.sensor_duration {
+        let duration_secs = match args.sensor_duration_secs {
             Some(duration_secs) => {
                 tracing::info!("parse sensor duration {:?}", duration_secs);
                 std::time::Duration::from_secs_f32(duration_secs)
             }
             None => {
-                tracing::info!("no parse sensor duration");
+                tracing::info!("no sensor duration");
                 return;
             }
         };
 
         loop {
-            let file = match std::fs::File::open(filepath) {
+            let file = match std::fs::File::open(path) {
                 Ok(file) => {
-                    tracing::debug!("success to read sensor file {:?}", filepath);
+                    tracing::debug!("success to read sensor file {:?}", path);
                     file
                 }
                 Err(err) => {
@@ -201,13 +191,13 @@ mod server {
                 }
             };
 
-            let content = match serde_json::from_reader::<_, SensorContent>(file) {
-                Ok(content) => {
-                    tracing::debug!("success to parse sensor content {:?}", content);
-                    content
+            let sensor_data = match serde_json::from_reader::<_, SensorData>(file) {
+                Ok(sensor_data) => {
+                    tracing::debug!("success to parse sensor data {:?}", sensor_data);
+                    sensor_data
                 }
                 Err(err) => {
-                    tracing::warn!("failed to parse sensor content {:?}", err);
+                    tracing::warn!("failed to parse sensor data {:?}", err);
                     tokio::time::sleep(duration_secs).await;
                     continue;
                 }
@@ -215,8 +205,8 @@ mod server {
 
             let mut state = state.lock().await;
 
-            state.temperature = Some(content.temperature);
-            state.humidity = Some(content.humidity);
+            state.temperature = Some(sensor_data.temperature);
+            state.humidity = Some(sensor_data.humidity);
 
             drop(state);
 
@@ -225,29 +215,62 @@ mod server {
     }
 }
 
-mod picture_buffer {
+mod polling {
+    use crate::state;
+    use warp::Filter;
+
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Response {
+        date_time: chrono::DateTime<chrono::Local>,
+        image_url: Option<String>,
+        temperature: Option<f32>,
+        humidity: Option<f32>,
+    }
+
+    pub fn handle(
+        state: state::SyncState,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        async fn handle(state: state::SyncState) -> impl warp::Reply {
+            // silent
+            // tracing::info!("hit polling api");
+
+            let state = state.lock().await;
+
+            let response = Response {
+                date_time: chrono::Local::now(),
+                image_url: state.image_url.clone(),
+                temperature: state.temperature,
+                humidity: state.humidity,
+            };
+
+            warp::reply::json(&response)
+        }
+
+        warp::path("polling")
+            .and(warp::get())
+            .map(move || state.clone())
+            .then(handle)
+    }
+}
+
+mod image_buffer {
+    use crate::{args, reject};
     use anyhow::Context;
     use warp::Filter;
 
-    use crate::reject;
+    type SyncImageBuffer = std::sync::Arc<tokio::sync::Mutex<ImageBuffer>>;
 
-    type SyncBuffer = std::sync::Arc<tokio::sync::Mutex<Buffer>>;
-
-    struct ImageEntry {
-        bytes: Vec<u8>,
-        rgb: [u8; 3],
-    }
-
-    pub struct Buffer {
+    pub struct ImageBuffer {
         client: reqwest::Client,
-        images: std::collections::HashMap<String, ImageEntry>,
+        images: std::collections::HashMap<String, Vec<u8>>,
     }
 
-    impl Default for Buffer {
-        fn default() -> Self {
+    impl ImageBuffer {
+        pub fn new() -> Self {
             Self {
-                client: reqwest::Client::new(),
-                images: std::collections::HashMap::new(),
+                client: Default::default(),
+                images: Default::default(),
             }
         }
     }
@@ -255,60 +278,72 @@ mod picture_buffer {
     #[derive(Debug, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Request {
-        url: String,
+        image_url: String,
     }
 
     pub fn handle(
-        buffer: SyncBuffer,
+        args: args::SyncArgs,
+        image_buffer: SyncImageBuffer,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         async fn handle(
             request: Request,
-            buffer: SyncBuffer,
+            args: args::SyncArgs,
+            image_buffer: SyncImageBuffer,
         ) -> Result<impl warp::Reply, warp::Rejection> {
-            tracing::info!("hit picture buffer {:?}", request);
+            tracing::info!("hit image buffer endpoint {:?}", request);
 
-            let mut buffer = buffer.lock().await;
+            let mut image_buffer = image_buffer.lock().await;
 
-            let image = match buffer.images.get(&request.url) {
+            let image = match image_buffer.images.get(&request.image_url) {
                 Some(image) => {
-                    tracing::debug!("use cache image {:?}", request.url);
+                    tracing::debug!("use cached image {:?}", request.image_url);
                     image
                 }
                 None => {
-                    tracing::info!("buffer image {:?}", request.url);
-                    let image = buffering(&buffer.client, &request.url)
-                        .await
-                        .map_err(reject::to)?;
+                    tracing::info!("download new image {:?}", request.image_url);
+                    let image = download_image(
+                        &image_buffer.client,
+                        &request.image_url,
+                        args.image_width,
+                        args.image_height,
+                    )
+                    .await
+                    .map_err(reject::to)?;
 
-                    tracing::debug!("create cache image {:?}", request.url);
-                    buffer.images.entry(request.url).or_insert(image)
+                    tracing::debug!("create new cached image {:?}", request.image_url);
+                    image_buffer
+                        .images
+                        .entry(request.image_url)
+                        .or_insert(image)
                 }
             };
 
             let response = warp::http::Response::builder()
                 .status(200)
                 .header("Content-Type", "image/jpeg")
-                .header("X-Repr-R", image.rgb[0].to_string())
-                .header("X-Repr-G", image.rgb[1].to_string())
-                .header("X-Repr-B", image.rgb[2].to_string())
-                .body(image.bytes.clone())
-                .context("failed to create http response for reply")
+                .body(image.clone())
+                .context("failed to build http response to reply")
                 .map_err(reject::to)?;
 
             Ok(response)
         }
 
-        warp::path("buffer")
+        warp::path("image-get")
             .and(warp::get())
             .and(warp::query::<Request>())
-            .map(move |request| (request, buffer.clone()))
+            .map(move |request| (request, args.clone(), image_buffer.clone()))
             .untuple_one()
             .and_then(handle)
     }
 
-    async fn buffering(client: &reqwest::Client, url: &str) -> anyhow::Result<ImageEntry> {
+    async fn download_image(
+        client: &reqwest::Client,
+        image_url: &str,
+        image_width: u32,
+        image_height: u32,
+    ) -> anyhow::Result<Vec<u8>> {
         let response = client
-            .get(url)
+            .get(image_url)
             .send()
             .await
             .context("failed to get http response")?;
@@ -330,216 +365,95 @@ mod picture_buffer {
 
         let mut buf = std::io::Cursor::new(vec![]);
         image
-            .write_to(&mut buf, image::ImageFormat::Jpeg)
-            .context("failed to encode into jpeg from image")?;
+            .resize_to_fill(image_width, image_height, image::imageops::CatmullRom)
+            .write_to(&mut buf, image::ImageFormat::WebP)
+            .context("failed to encode into webp from image")?;
         let bytes = buf.into_inner();
+        tracing::info!("encoded image size {:?} bytes", bytes.len());
 
-        let rgb = compute_repr_rgb(image).await.0;
-
-        Ok(ImageEntry { bytes, rgb })
-    }
-
-    async fn compute_repr_rgb(image: image::DynamicImage) -> image::Rgb<u8> {
-        let pixels = image.to_rgb8();
-        let pixels_len = pixels.len() / 3;
-
-        let r_iter = pixels.iter().step_by(3);
-        let g_iter = pixels.iter().skip(1).step_by(3);
-        let b_iter = pixels.iter().skip(2).step_by(3);
-
-        let r = (r_iter.fold(0, |acc, r| acc + *r as usize) / pixels_len) as u8;
-        let g = (g_iter.fold(0, |acc, g| acc + *g as usize) / pixels_len) as u8;
-        let b = (b_iter.fold(0, |acc, b| acc + *b as usize) / pixels_len) as u8;
-
-        image::Rgb([r, g, b])
+        Ok(bytes)
     }
 }
 
-mod polling {
-    use futures::{SinkExt, StreamExt};
+mod image_index {
+    use crate::state;
     use warp::Filter;
-
-    use crate::server;
-
-    #[derive(serde::Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Response {
-        date_time: chrono::DateTime<chrono::Local>,
-        url: Option<String>,
-        temperature: Option<f32>,
-        humidity: Option<f32>,
-    }
-
-    pub fn handle(
-        state: server::SyncState,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        async fn ws_handle(ws: warp::ws::WebSocket, state: server::SyncState) {
-            tracing::info!("established websocket connection");
-
-            let (mut tx, mut rx) = ws.split();
-
-            while rx.next().await.is_some() {
-                let state = state.lock().await;
-
-                let response = Response {
-                    date_time: chrono::Local::now(),
-                    url: state.url.clone(),
-                    temperature: state.temperature,
-                    humidity: state.humidity,
-                };
-
-                match serde_json::to_string(&response) {
-                    Ok(text) => {
-                        let message = warp::ws::Message::text(text);
-                        match tx.send(message).await {
-                            Ok(_) => {
-                                tracing::debug!("success to send message");
-                            }
-                            Err(err) => {
-                                tracing::warn!("failed to send message {:?}", err);
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!("failed to serialize {:?}", err);
-                    }
-                }
-            }
-        }
-
-        warp::path("polling")
-            .and(warp::ws())
-            .map(move |ws| (ws, state.clone()))
-            .untuple_one()
-            .map(|ws: warp::ws::Ws, state| ws.on_upgrade(|ws| ws_handle(ws, state)))
-    }
-}
-
-mod picture_index {
-    use warp::Filter;
-
-    use crate::server;
 
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Response {
         duration_secs: f32,
-        urls: Vec<String>,
-        url: Option<String>,
+        image_urls: Vec<String>,
+        image_url: Option<String>,
     }
 
     pub fn handle(
-        state: server::SyncState,
+        state: state::SyncState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        async fn handle(state: server::SyncState) -> impl warp::Reply {
-            tracing::info!("hit picture index");
+        async fn handle(state: state::SyncState) -> impl warp::Reply {
+            tracing::info!("hit image index api");
 
             let state = state.lock().await;
 
             let response = Response {
                 duration_secs: state.duration_secs,
-                urls: state.url_set.iter().cloned().collect::<Vec<_>>(),
-                url: state.url.clone(),
+                image_urls: state.image_urls.iter().cloned().collect::<Vec<_>>(),
+                image_url: state.image_url.clone(),
             };
 
             warp::reply::json(&response)
         }
 
-        warp::path("config")
+        warp::path("image-index")
             .and(warp::get())
             .map(move || state.clone())
             .then(handle)
     }
 }
 
-mod picture_apply {
+mod image_modify {
+    use crate::{args, reject, state};
     use warp::Filter;
-
-    use crate::{args, reject, server};
 
     #[derive(Debug, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Request {
         duration_secs: Option<f32>,
-        url: Option<String>,
+        image_url: Option<String>,
     }
 
     pub fn handle(
         args: args::SyncArgs,
-        state: server::SyncState,
+        state: state::SyncState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         async fn handle(
             request: Request,
             args: args::SyncArgs,
-            state: server::SyncState,
+            state: state::SyncState,
         ) -> Result<impl warp::Reply, warp::Rejection> {
-            tracing::info!("hit picture apply {:?}", request);
+            tracing::info!("hit image modify endpoint {:?}", request);
 
             let mut state = state.lock().await;
 
-            if let Some(url) = request.url {
-                tracing::info!("set current url {:?}", url);
-                state.url = Some(url);
+            if let Some(image) = request.image_url {
+                tracing::info!("set current image url {:?}", image);
+                state.image_url = Some(image);
             }
 
-            if let Some(duration_secs) = request.duration_secs {
-                tracing::info!("set duration secs {:?}", duration_secs);
-                state.duration_secs = duration_secs;
+            if let Some(duration) = request.duration_secs {
+                tracing::info!("set duration {:?}", duration);
+                state.duration_secs = duration;
             }
 
             state
-                .write(&args.state_filepath)
+                .write_to_file(&args.state_filepath)
                 .await
                 .map_err(reject::to)?;
 
             Ok(warp::http::StatusCode::OK)
         }
 
-        warp::path("config")
-            .and(warp::patch())
-            .and(warp::body::json())
-            .map(move |request| (request, args.clone(), state.clone()))
-            .untuple_one()
-            .and_then(handle)
-    }
-}
-
-mod picture_create {
-    use warp::Filter;
-
-    use crate::{args, reject, server};
-
-    #[derive(Debug, serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Request {
-        url: String,
-    }
-
-    pub fn handle(
-        args: args::SyncArgs,
-        state: server::SyncState,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        async fn handle(
-            request: Request,
-            args: args::SyncArgs,
-            state: server::SyncState,
-        ) -> Result<impl warp::Reply, warp::Rejection> {
-            tracing::info!("hit picture create {:?}", request);
-
-            let mut state = state.lock().await;
-
-            tracing::info!("insert url {:?}", request.url);
-            state.url_set.insert(request.url);
-
-            state
-                .write(&args.state_filepath)
-                .await
-                .map_err(reject::to)?;
-
-            Ok(warp::http::StatusCode::OK)
-        }
-
-        warp::path("config")
+        warp::path("image-modify")
             .and(warp::post())
             .and(warp::body::json())
             .map(move |request| (request, args.clone(), state.clone()))
@@ -548,43 +462,85 @@ mod picture_create {
     }
 }
 
-mod picture_delete {
+mod image_create {
+    use crate::{args, reject, state};
     use warp::Filter;
-
-    use crate::{args, reject, server};
 
     #[derive(Debug, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Request {
-        url: String,
+        image_url: String,
     }
 
     pub fn handle(
         args: args::SyncArgs,
-        state: server::SyncState,
+        state: state::SyncState,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         async fn handle(
             request: Request,
             args: args::SyncArgs,
-            state: server::SyncState,
+            state: state::SyncState,
         ) -> Result<impl warp::Reply, warp::Rejection> {
-            tracing::info!("hit picture delete {:?}", request);
+            tracing::info!("hit image create endpoint {:?}", request);
 
             let mut state = state.lock().await;
 
-            tracing::info!("remove url {:?}", request.url);
-            state.url_set.remove(&request.url);
+            tracing::info!("insert new image url {:?}", request.image_url);
+            state.image_urls.insert(request.image_url);
 
             state
-                .write(&args.state_filepath)
+                .write_to_file(&args.state_filepath)
                 .await
                 .map_err(reject::to)?;
 
             Ok(warp::http::StatusCode::OK)
         }
 
-        warp::path("config")
-            .and(warp::delete())
+        warp::path("image-create")
+            .and(warp::post())
+            .and(warp::body::json())
+            .map(move |request| (request, args.clone(), state.clone()))
+            .untuple_one()
+            .and_then(handle)
+    }
+}
+
+mod image_delete {
+    use crate::{args, reject, state};
+    use warp::Filter;
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Request {
+        image_url: String,
+    }
+
+    pub fn handle(
+        args: args::SyncArgs,
+        state: state::SyncState,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        async fn handle(
+            request: Request,
+            args: args::SyncArgs,
+            state: state::SyncState,
+        ) -> Result<impl warp::Reply, warp::Rejection> {
+            tracing::info!("hit image delete endpoint {:?}", request);
+
+            let mut state = state.lock().await;
+
+            tracing::info!("remove image url {:?}", request.image_url);
+            state.image_urls.remove(&request.image_url);
+
+            state
+                .write_to_file(&args.state_filepath)
+                .await
+                .map_err(reject::to)?;
+
+            Ok(warp::http::StatusCode::OK)
+        }
+
+        warp::path("image-delete")
+            .and(warp::post())
             .and(warp::body::json())
             .map(move |request| (request, args.clone(), state.clone()))
             .untuple_one()

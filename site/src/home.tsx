@@ -14,19 +14,20 @@ import {
   createSignal,
   onCleanup,
 } from "solid-js";
-import { mock } from "./mock";
-import "./Home.css";
+
+import "./home.css";
+import { API_URL } from "./app";
 
 interface HomePageState {
   dateTime: string;
-  url?: string;
+  imageUrl?: string;
   temperature?: number;
   humidity?: number;
 }
 
 interface PollingResponse {
   dateTime: string;
-  url?: string;
+  imageUrl?: string;
   temperature?: number;
   humidity?: number;
 }
@@ -37,26 +38,17 @@ export const HomePage = () => {
   createEffect(() => {
     let handle: number | undefined = undefined;
 
-    const onOpen = () => {
-      handle = setInterval(() => {
-        ws.send("");
-      }, 250);
+    const sendEmpty = () => {
+      fetch(`${API_URL}/polling`)
+        .then((response) => response.json())
+        .then((response: PollingResponse) => {
+          setState(response);
+        });
     };
-
-    const onMessage = async (event: MessageEvent<string>) => {
-      const response: PollingResponse = JSON.parse(event.data);
-      setState(response);
-    };
-
-    const ws = new WebSocket(`${mock.wsUrl}/polling`);
-    ws.addEventListener("open", onOpen);
-    ws.addEventListener("message", onMessage);
+    handle = setInterval(sendEmpty, 250);
 
     onCleanup(() => {
       clearInterval(handle);
-      ws.removeEventListener("open", onOpen);
-      ws.removeEventListener("message", onMessage);
-      ws.close();
     });
   }, []);
 
@@ -140,8 +132,10 @@ const BarComponent = (props: { label: string; value: number }) => {
 
 const BgComponent = (props: { state: HomePageState }) => {
   return (
-    <Show when={props.state.url}>
-      {(url) => <img src={`${mock.apiUrl}/buffer?url=${url()}`} class="bg" />}
+    <Show when={props.state.imageUrl}>
+      {(url) => (
+        <img src={`${API_URL}/image-get?imageUrl=${url()}`} class="bg" />
+      )}
     </Show>
   );
 };
