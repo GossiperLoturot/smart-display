@@ -1,5 +1,10 @@
 # smart-display
 
+![display](https://raw.githubusercontent.com/GossiperLoturot/smart-display/main/images/display.webp)
+![menu](https://raw.githubusercontent.com/GossiperLoturot/smart-display/main/images/menu.webp)
+
+*Picture from [Unsplash.com](https://unsplash.com/)*
+
 This application displays information like date and time.
 
 ## Usages
