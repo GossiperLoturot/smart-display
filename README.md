@@ -14,32 +14,42 @@ This application displays information like date and time.
 git clone https://github.com/GossiperLoturot/smart-display
 ```
 
-2. Launch the API server.
-```sh
-cargo run --release --state-filepath=./state.json --address=localhost:50822
-```
-
-3. Build and serve the web page.
+2. Build the web page.
 ```sh
 cd ./site
-bun i
-VITE_API_URL=http:/localhost:50822 bun run build
-bun run preview
+bun install
+bun run build
+
+# With environment variables
+VITE_POLLING_INTERVAL=250 bun run build
 ```
 
-### API server command options
+3. Launch the server.
+```sh
+cargo run --release
+
+# With extra data file
+cargo run --release -- --extra \
+    --extra-filepath /path/to/extra.json \
+    --extra-duration-secs 60
+```
+
+### Server Command Options
 
 |Command Options|Description|Default|
 |--|--|--|
-|state-filepath|persistent data file path||
-|address|The address and port on which the API server is listening||
-|image-width|Image width when saving image to buffer|800|
-|image-height|Image height when saving image to buffer|480|
-|th-combine|Whether to read temperature and humidity||
-|th-combine-filepath|Temperature and humidity file path||
-|th-combine-duration-secs|A millisecond interval to read temperature and humidity file||
+|state-filepath|persistent data file path|./state.json|
+|address|The address and port that the server is listening on|0.0.0.0:50822|
+|html|The web page served by the server|./html|
+|image-width|Image width when saving image to buffer|780|
+|image-height|Image height when saving image to buffer|460|
+|extra|Whether to read extra data file||
+|extra-filepath|extra data file path||
+|extra-duration-secs|A millisecond interval to read extra data file||
 
-#### Temperature and Humidity File Content
+#### Structure of Extra Data
+
+Currently, extra data only contains temperature and humidity.
 
 ```json
 {
@@ -52,7 +62,7 @@ bun run preview
 
 |Environment Variables|Description|Default|
 |--|--|--|
-|VITE_WIDTH|Expected width of the display|800|
-|VITE_HEIGHT|Expected height of the display|480|
-|VITE_API_URL|Expected API server address and port|localhost:50822|
+|VITE_WIDTH|Expected width of the display|780|
+|VITE_HEIGHT|Expected height of the display|460|
+|VITE_API_URL|Expected API server address and port|window.location.host|
 |VITE_POLLING_INTERVAL|A millisecond interval to communicate with the API server|250|

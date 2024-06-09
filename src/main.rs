@@ -12,20 +12,22 @@ mod args {
         about = env!("CARGO_PKG_DESCRIPTION"),
     )]
     pub struct Args {
-        #[arg(long)]
+        #[arg(long, default_value = "./state.json")]
         pub state_filepath: std::path::PathBuf,
         #[arg(long, default_value = "0.0.0.0:50822")]
         pub address: std::net::SocketAddr,
-        #[arg(long, default_value = "800")]
+        #[arg(long, default_value = "./html")]
+        pub html: std::path::PathBuf,
+        #[arg(long, default_value = "780")]
         pub image_width: u32,
-        #[arg(long, default_value = "480")]
+        #[arg(long, default_value = "460")]
         pub image_height: u32,
         #[arg(long)]
-        pub th_combine: bool,
-        #[arg(long, required_if_eq("th_combine", "true"))]
-        pub th_combine_filepath: Option<std::path::PathBuf>,
-        #[arg(long, required_if_eq("th_combine", "true"))]
-        pub th_combine_duration_secs: Option<f32>,
+        pub extra: bool,
+        #[arg(long, required_if_eq("extra", "true"))]
+        pub extra_filepath: Option<std::path::PathBuf>,
+        #[arg(long, required_if_eq("extra", "true"))]
+        pub extra_duration_secs: Option<f32>,
     }
 }
 
@@ -59,6 +61,8 @@ async fn main() {
         .or(image_create::handle(args.clone(), state.clone()))
         .or(image_delete::handle(args.clone(), state.clone()))
         .or(image_buffer::handle(args.clone(), image_buffer.clone()))
+        .or(warp::fs::dir(args.html.clone()))
+        .or(warp::fs::file(args.html.join("index.html")))
         .recover(reject::handle)
         .with(
             warp::cors()
@@ -70,7 +74,7 @@ async fn main() {
 
     tracing::info!("start background state routine");
     tokio::spawn(state::image_shuffling_loop(state.clone()));
-    tokio::spawn(state::th_combine_fething_loop(args.clone(), state));
+    tokio::spawn(state::extra_fething_loop(args.clone(), state));
 
     tracing::info!("start listening {:?}", args.address);
     warp::serve(filter).run(args.address).await;
@@ -90,7 +94,7 @@ mod state {
         #[serde(skip)]
         pub image_url: Option<String>,
         #[serde(skip)]
-        pub th_combine: Option<ThCombine>,
+        pub extra: Option<Extra>,
     }
 
     impl State {
@@ -99,7 +103,7 @@ mod state {
                 duration_secs: 60.0,
                 image_urls: Default::default(),
                 image_url: Default::default(),
-                th_combine: Default::default(),
+                extra: Default::default(),
             }
         }
 
@@ -148,30 +152,30 @@ mod state {
 
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
-    pub struct ThCombine {
+    pub struct Extra {
         pub temperature: f32,
         pub humidity: f32,
     }
 
-    pub async fn th_combine_fething_loop(args: args::SyncArgs, state: SyncState) {
-        let path = match args.th_combine_filepath.as_ref() {
+    pub async fn extra_fething_loop(args: args::SyncArgs, state: SyncState) {
+        let path = match args.extra_filepath.as_ref() {
             Some(path) => {
-                tracing::info!("parse th combine file path {:?}", path);
+                tracing::info!("parse extra file path {:?}", path);
                 path
             }
             None => {
-                tracing::info!("no th combine file path");
+                tracing::info!("no extra file path");
                 return;
             }
         };
 
-        let secs = match args.th_combine_duration_secs {
+        let secs = match args.extra_duration_secs {
             Some(secs) => {
-                tracing::info!("parse th combine duration {:?}", secs);
+                tracing::info!("parse extra duration {:?}", secs);
                 std::time::Duration::from_secs_f32(secs)
             }
             None => {
-                tracing::info!("no th combine duration");
+                tracing::info!("no extra duration");
                 return;
             }
         };
@@ -179,23 +183,23 @@ mod state {
         loop {
             let file = match std::fs::File::open(path) {
                 Ok(file) => {
-                    tracing::debug!("success to read th combine file {:?}", path);
+                    tracing::debug!("success to read extra file {:?}", path);
                     file
                 }
                 Err(err) => {
-                    tracing::warn!("failed to read th combine file {:?}", err);
+                    tracing::warn!("failed to read extra file {:?}", err);
                     tokio::time::sleep(secs).await;
                     continue;
                 }
             };
 
-            let th_combine = match serde_json::from_reader::<_, ThCombine>(file) {
-                Ok(th_combine) => {
-                    tracing::debug!("success to parse th combine {:?}", th_combine);
-                    th_combine
+            let extra = match serde_json::from_reader::<_, Extra>(file) {
+                Ok(extra) => {
+                    tracing::debug!("success to parse extra {:?}", extra);
+                    extra
                 }
                 Err(err) => {
-                    tracing::warn!("failed to parse th combine {:?}", err);
+                    tracing::warn!("failed to parse extra {:?}", err);
                     tokio::time::sleep(secs).await;
                     continue;
                 }
@@ -203,7 +207,7 @@ mod state {
 
             let mut state = state.lock().await;
 
-            state.th_combine = Some(th_combine);
+            state.extra = Some(extra);
 
             drop(state);
 
@@ -223,7 +227,7 @@ mod polling {
         #[serde(skip_serializing_if = "Option::is_none")]
         image_url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        th_combine: Option<state::ThCombine>,
+        extra: Option<state::Extra>,
     }
 
     pub fn handle(
@@ -238,7 +242,7 @@ mod polling {
             let response = Response {
                 date_time: chrono::Local::now(),
                 image_url: state.image_url.clone(),
-                th_combine: state.th_combine.clone(),
+                extra: state.extra.clone(),
             };
 
             warp::reply::json(&response)
@@ -317,7 +321,7 @@ mod image_buffer {
 
             let response = warp::http::Response::builder()
                 .status(200)
-                .header("Content-Type", "image/jpeg")
+                .header("Content-Type", "image/webp")
                 .body(image.clone())
                 .context("failed to build http response to reply")
                 .map_err(reject::to)?;

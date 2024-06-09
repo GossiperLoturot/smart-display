@@ -27,7 +27,7 @@ export const Background = (props: BackgroundProps) => {
 
 export interface DateTimeProps {
   dateTime: string;
-  thCombine:
+  extra:
     | {
         temperature: number;
         humidity: number;
@@ -43,10 +43,10 @@ export const DateTime = (props: DateTimeProps) => {
     return { dateString, timeString };
   });
 
-  const thCombineStrings = createMemo(() => {
-    if (props.thCombine) {
-      const temperatureString = `${props.thCombine.temperature.toFixed(1)}℃`;
-      const humidityString = `${props.thCombine.humidity.toFixed(1)}%RH`;
+  const extraStrings = createMemo(() => {
+    if (props.extra) {
+      const temperatureString = `${props.extra.temperature.toFixed(1)}℃`;
+      const humidityString = `${props.extra.humidity.toFixed(1)}%RH`;
       return { temperatureString, humidityString };
     }
     return;
@@ -68,13 +68,13 @@ export const DateTime = (props: DateTimeProps) => {
         {/* Sensor text line */}
         <div class="text-[56px] leading-[1.2] font-bold drop-shadow-[0_4px_8px_rgba(0,0,0,0.25)]">
           <Show
-            when={thCombineStrings()}
+            when={extraStrings()}
             fallback={<div class="invisible">INVISIBLE</div>}
           >
-            {(thCombineStrings) => (
+            {(extraStrings) => (
               <div class="flex justify-evenly">
-                <div>{thCombineStrings().temperatureString}</div>
-                <div>{thCombineStrings().humidityString}</div>
+                <div>{extraStrings().temperatureString}</div>
+                <div>{extraStrings().humidityString}</div>
               </div>
             )}
           </Show>
