@@ -14,11 +14,11 @@ mod args {
     pub struct Args {
         #[arg(long)]
         pub state_filepath: std::path::PathBuf,
-        #[arg(long)]
+        #[arg(long, default_value = "0.0.0.0:50822")]
         pub address: std::net::SocketAddr,
-        #[arg(long, default_value_t = 800)]
+        #[arg(long, default_value = "800")]
         pub image_width: u32,
-        #[arg(long, default_value_t = 480)]
+        #[arg(long, default_value = "480")]
         pub image_height: u32,
         #[arg(long)]
         pub th_combine: bool,

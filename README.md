@@ -1,27 +1,53 @@
-![GitHub](https://img.shields.io/github/license/GossiperLoturot/smart-display)
-
 # smart-display
 
-This application shows information such as date and time.
+This application displays information like date and time.
 
 ## Usages
 
-1. Clone this repository by `git clone https://github.com/GossiperLoturot/smart-display`.
-2. Run `npm i` and `npm run build` to generate static sites.
-3. Run `cargo run --release` at `/api` for launch server.
+1. Clone this repository.
+```sh
+git clone https://github.com/GossiperLoturot/smart-display
+```
 
-|Environment Variants|Description|Default|
+2. Launch the API server.
+```sh
+cargo run --release --state-filepath=./state.json --address=localhost:50822
+```
+
+3. Build and serve the web page.
+```sh
+cd ./site
+bun i
+VITE_API_URL=http:/localhost:50822 bun run build
+bun run preview
+```
+
+### API server command options
+
+|Command Options|Description|Default|
 |--|--|--|
-|DIST_DIR|A place that static sites exists|dist|
-|DIST_FILE|A place that index.html exists|DIST_DIR/index.html|
-|ADDR|A address that web server hosts|127.0.0.1:3000|
+|state-filepath|persistent data file path||
+|address|The address and port on which the API server is listening||
+|image-width|Image width when saving image to buffer|800|
+|image-height|Image height when saving image to buffer|480|
+|th-combine|Whether to read temperature and humidity||
+|th-combine-filepath|Temperature and humidity file path||
+|th-combine-duration-secs|A millisecond interval to read temperature and humidity file||
 
-## Developments
+#### Temperature and Humidity File Content
 
-1. Run `cargo run` at `/api` to launch server for developments.
-2. Run `npm run dev` to launch client.
+```json
+{
+    "temperature": 25.0,
+    "humidity": 40.5
+}
+```
 
-## Productions
+### Web Page Environment Variables
 
-1. Extracts binary and static sites from `/api/target/release/smart-display` and `/dist` after build.
-2. Place there at new directory and run `ADDR=0.0.0.0:3000 ./smart-display` to launch server.
+|Environment Variables|Description|Default|
+|--|--|--|
+|VITE_WIDTH|Expected width of the display|800|
+|VITE_HEIGHT|Expected height of the display|480|
+|VITE_API_URL|Expected API server address and port|localhost:50822|
+|VITE_POLLING_INTERVAL|A millisecond interval to communicate with the API server|250|

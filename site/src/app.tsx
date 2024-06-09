@@ -11,10 +11,10 @@ import {
 import "./app.css";
 import { Background, Bar, DateTime, Menu, Outline } from "./components";
 
-export const WIDTH = 800;
-export const HEIGHT = 480;
-export const API_URL = "http://localhost:3000";
-export const POLLING_INTERVAL = 250;
+export const WIDTH = import.meta.env.VITE_HEIGHT || 800
+export const HEIGHT = import.meta.env.VITE_WIDTH || 480;
+export const API_URL = import.meta.env.VITE_API_URL || "http://localhost:50822";
+export const POLLING_INTERVAL = import.meta.env.VITE_POLLING_INTERVAL || 250;
 
 export interface PollingResponse {
   dateTime: string;
