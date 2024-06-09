@@ -1,5 +1,8 @@
 import {
   type JSX,
+  Match,
+  Show,
+  Switch,
   createEffect,
   createResource,
   createSignal,
@@ -13,22 +16,39 @@ export const HEIGHT = 480;
 export const API_URL = "http://localhost:3000";
 export const POLLING_INTERVAL = 250;
 
-export interface Polling {
+export interface PollingResponse {
   dateTime: string;
-  imageUrl?: string;
-  temperature?: number;
-  humidity?: number;
+  thCombine:
+    | {
+        temperature: number;
+        humidity: number;
+      }
+    | undefined;
+  imageUrl: string | undefined;
 }
 
-export interface ImageIndex {
+export interface ImageIndexResponse {
   durationSecs: number;
   imageUrls: string[];
-  imageUrl?: string;
+  imageUrl: string | undefined;
+}
+
+export interface ImageModifyRequest {
+  durationSecs: number | undefined;
+  imageUrl: string | undefined;
+}
+
+export interface ImageCreateRequest {
+  imageUrl: string;
+}
+
+export interface ImageDeleteRequest {
+  imageUrl: string;
 }
 
 export const App = () => {
-  const [polling, setPolling] = createSignal<Polling>();
-  const [visible, setVisible] = createSignal<boolean>(false);
+  const [polling, setPolling] = createSignal<PollingResponse>();
+  const [holdMenu, setHoldMenu] = createSignal<boolean>(false);
 
   createEffect(() => {
     let handle: number | undefined = undefined;
@@ -36,7 +56,7 @@ export const App = () => {
     const fetchState = () => {
       fetch(`${API_URL}/polling`)
         .then((response) => response.json())
-        .then((response: Polling) => {
+        .then((response: PollingResponse) => {
           setPolling(response);
         });
     };
@@ -48,11 +68,56 @@ export const App = () => {
     });
   });
 
-  const [imageIndex] = createResource(async () => {
+  const [imageIndex, { refetch }] = createResource(async () => {
     return await fetch(`${API_URL}/image-index`)
       .then((response) => response.json())
-      .then((response: ImageIndex) => response);
+      .then((response: ImageIndexResponse) => response);
   });
+
+  const onModify = async (request: ImageModifyRequest) => {
+    await fetch(`${API_URL}/image-modify`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    });
+    await refetch();
+  };
+
+  const onCreate = async (request: ImageCreateRequest) => {
+    await fetch(`${API_URL}/image-create`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    });
+    await refetch();
+  };
+
+  const onDelete = async (request: ImageDeleteRequest) => {
+    await fetch(`${API_URL}/image-delete`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    });
+    await refetch();
+  };
+
+  const imageUrlState = () => polling()?.imageUrl;
+  const dateTimeState = () => {
+    const pollingValue = polling();
+    if (pollingValue?.dateTime) {
+      return {
+        dateTime: pollingValue.dateTime,
+        thCombine: pollingValue.thCombine,
+      };
+    }
+    return;
+  };
 
   const containerStyle: JSX.CSSProperties = {
     width: `${WIDTH}px`,
@@ -64,19 +129,36 @@ export const App = () => {
   return (
     <div class="w-screen h-screen flex">
       <div class="m-auto relative" style={containerStyle}>
-        <Background imageUrl={polling()?.imageUrl} />
-        <Outline visible={!visible()} />
-        <DateTime
-          dateTime={polling()?.dateTime}
-          temperature={polling()?.temperature}
-          humidity={polling()?.humidity}
-        />
-        <Bar visible={!visible()} onClick={() => setVisible(true)} />
-        <Menu
-          visible={visible()}
-          onClose={() => setVisible(false)}
-          imageIndex={imageIndex()}
-        />
+        <Show when={imageUrlState()}>
+          {(imageUrl) => <Background imageUrl={imageUrl()} />}
+        </Show>
+        <Show when={dateTimeState()}>
+          {(dateTime) => (
+            <DateTime
+              dateTime={dateTime().dateTime}
+              thCombine={dateTime().thCombine}
+            />
+          )}
+        </Show>
+        <Switch>
+          <Match when={!holdMenu()}>
+            <Outline />
+            <Bar onClick={() => setHoldMenu(true)} />
+          </Match>
+          <Match when={holdMenu()}>
+            <Show when={imageIndex()}>
+              {(imageIndex) => (
+                <Menu
+                  onClose={() => setHoldMenu(false)}
+                  imageIndex={imageIndex()}
+                  onModify={onModify}
+                  onCreate={onCreate}
+                  onDelete={onDelete}
+                />
+              )}
+            </Show>
+          </Match>
+        </Switch>
       </div>
     </div>
   );

@@ -4,7 +4,7 @@ use warp::Filter;
 mod args {
     pub type SyncArgs = std::sync::Arc<Args>;
 
-    #[derive(clap::Parser)]
+    #[derive(Debug, Clone, clap::Parser)]
     #[clap(
         name = env!("CARGO_PKG_NAME"),
         version = env!("CARGO_PKG_VERSION"),
@@ -21,11 +21,11 @@ mod args {
         #[arg(long, default_value_t = 480)]
         pub image_height: u32,
         #[arg(long)]
-        pub sensor: bool,
-        #[arg(long, required_if_eq("sensor", "true"))]
-        pub sensor_filepath: Option<std::path::PathBuf>,
-        #[arg(long, required_if_eq("sensor", "true"))]
-        pub sensor_duration_secs: Option<f32>,
+        pub th_combine: bool,
+        #[arg(long, required_if_eq("th_combine", "true"))]
+        pub th_combine_filepath: Option<std::path::PathBuf>,
+        #[arg(long, required_if_eq("th_combine", "true"))]
+        pub th_combine_duration_secs: Option<f32>,
     }
 }
 
@@ -70,7 +70,7 @@ async fn main() {
 
     tracing::info!("start background state routine");
     tokio::spawn(state::image_shuffling_loop(state.clone()));
-    tokio::spawn(state::sensor_fething_loop(args.clone(), state));
+    tokio::spawn(state::th_combine_fething_loop(args.clone(), state));
 
     tracing::info!("start listening {:?}", args.address);
     warp::serve(filter).run(args.address).await;
@@ -82,7 +82,7 @@ mod state {
 
     pub type SyncState = std::sync::Arc<tokio::sync::Mutex<State>>;
 
-    #[derive(serde::Serialize, serde::Deserialize)]
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct State {
         pub duration_secs: f32,
@@ -90,9 +90,7 @@ mod state {
         #[serde(skip)]
         pub image_url: Option<String>,
         #[serde(skip)]
-        pub temperature: Option<f32>,
-        #[serde(skip)]
-        pub humidity: Option<f32>,
+        pub th_combine: Option<ThCombine>,
     }
 
     impl State {
@@ -101,8 +99,7 @@ mod state {
                 duration_secs: 60.0,
                 image_urls: Default::default(),
                 image_url: Default::default(),
-                temperature: Default::default(),
-                humidity: Default::default(),
+                th_combine: Default::default(),
             }
         }
 
@@ -149,31 +146,32 @@ mod state {
         }
     }
 
-    #[derive(Debug, serde::Deserialize)]
-    struct SensorData {
-        temperature: f32,
-        humidity: f32,
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ThCombine {
+        pub temperature: f32,
+        pub humidity: f32,
     }
 
-    pub async fn sensor_fething_loop(args: args::SyncArgs, state: SyncState) {
-        let path = match args.sensor_filepath.as_ref() {
+    pub async fn th_combine_fething_loop(args: args::SyncArgs, state: SyncState) {
+        let path = match args.th_combine_filepath.as_ref() {
             Some(path) => {
-                tracing::info!("parse sensor file path {:?}", path);
+                tracing::info!("parse th combine file path {:?}", path);
                 path
             }
             None => {
-                tracing::info!("no sensor file path");
+                tracing::info!("no th combine file path");
                 return;
             }
         };
 
-        let duration_secs = match args.sensor_duration_secs {
-            Some(duration_secs) => {
-                tracing::info!("parse sensor duration {:?}", duration_secs);
-                std::time::Duration::from_secs_f32(duration_secs)
+        let secs = match args.th_combine_duration_secs {
+            Some(secs) => {
+                tracing::info!("parse th combine duration {:?}", secs);
+                std::time::Duration::from_secs_f32(secs)
             }
             None => {
-                tracing::info!("no sensor duration");
+                tracing::info!("no th combine duration");
                 return;
             }
         };
@@ -181,36 +179,35 @@ mod state {
         loop {
             let file = match std::fs::File::open(path) {
                 Ok(file) => {
-                    tracing::debug!("success to read sensor file {:?}", path);
+                    tracing::debug!("success to read th combine file {:?}", path);
                     file
                 }
                 Err(err) => {
-                    tracing::warn!("failed to read sensor file {:?}", err);
-                    tokio::time::sleep(duration_secs).await;
+                    tracing::warn!("failed to read th combine file {:?}", err);
+                    tokio::time::sleep(secs).await;
                     continue;
                 }
             };
 
-            let sensor_data = match serde_json::from_reader::<_, SensorData>(file) {
-                Ok(sensor_data) => {
-                    tracing::debug!("success to parse sensor data {:?}", sensor_data);
-                    sensor_data
+            let th_combine = match serde_json::from_reader::<_, ThCombine>(file) {
+                Ok(th_combine) => {
+                    tracing::debug!("success to parse th combine {:?}", th_combine);
+                    th_combine
                 }
                 Err(err) => {
-                    tracing::warn!("failed to parse sensor data {:?}", err);
-                    tokio::time::sleep(duration_secs).await;
+                    tracing::warn!("failed to parse th combine {:?}", err);
+                    tokio::time::sleep(secs).await;
                     continue;
                 }
             };
 
             let mut state = state.lock().await;
 
-            state.temperature = Some(sensor_data.temperature);
-            state.humidity = Some(sensor_data.humidity);
+            state.th_combine = Some(th_combine);
 
             drop(state);
 
-            tokio::time::sleep(duration_secs).await;
+            tokio::time::sleep(secs).await;
         }
     }
 }
@@ -219,13 +216,14 @@ mod polling {
     use crate::state;
     use warp::Filter;
 
-    #[derive(serde::Serialize)]
+    #[derive(Debug, Clone, serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Response {
         date_time: chrono::DateTime<chrono::Local>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         image_url: Option<String>,
-        temperature: Option<f32>,
-        humidity: Option<f32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        th_combine: Option<state::ThCombine>,
     }
 
     pub fn handle(
@@ -240,8 +238,7 @@ mod polling {
             let response = Response {
                 date_time: chrono::Local::now(),
                 image_url: state.image_url.clone(),
-                temperature: state.temperature,
-                humidity: state.humidity,
+                th_combine: state.th_combine.clone(),
             };
 
             warp::reply::json(&response)
@@ -275,7 +272,7 @@ mod image_buffer {
         }
     }
 
-    #[derive(Debug, serde::Deserialize)]
+    #[derive(Debug, Clone, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Request {
         image_url: String,
@@ -379,11 +376,12 @@ mod image_index {
     use crate::state;
     use warp::Filter;
 
-    #[derive(serde::Serialize)]
+    #[derive(Debug, Clone, serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Response {
         duration_secs: f32,
         image_urls: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         image_url: Option<String>,
     }
 
@@ -415,7 +413,7 @@ mod image_modify {
     use crate::{args, reject, state};
     use warp::Filter;
 
-    #[derive(Debug, serde::Deserialize)]
+    #[derive(Debug, Clone, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Request {
         duration_secs: Option<f32>,
@@ -466,7 +464,7 @@ mod image_create {
     use crate::{args, reject, state};
     use warp::Filter;
 
-    #[derive(Debug, serde::Deserialize)]
+    #[derive(Debug, Clone, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Request {
         image_url: String,
@@ -509,7 +507,7 @@ mod image_delete {
     use crate::{args, reject, state};
     use warp::Filter;
 
-    #[derive(Debug, serde::Deserialize)]
+    #[derive(Debug, Clone, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Request {
         image_url: String,
@@ -558,7 +556,7 @@ mod reject {
 
     impl warp::reject::Reject for Rejection {}
 
-    #[derive(serde::Serialize)]
+    #[derive(Debug, Clone, serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Response {
         status_code: u16,
