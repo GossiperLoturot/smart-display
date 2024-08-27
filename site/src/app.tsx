@@ -11,7 +11,7 @@ import {
 import "./app.css";
 import { Background, Bar, DateTime, Menu, Outline } from "./components";
 
-export const WIDTH = import.meta.env.VITE_HEIGHT || 780
+export const WIDTH = import.meta.env.VITE_HEIGHT || 780;
 export const HEIGHT = import.meta.env.VITE_WIDTH || 460;
 export const API_URL = import.meta.env.VITE_API_URL || window.location.origin;
 export const POLLING_INTERVAL = import.meta.env.VITE_POLLING_INTERVAL || 250;
@@ -134,10 +134,7 @@ export const App = () => {
         </Show>
         <Show when={dateTimeState()}>
           {(dateTime) => (
-            <DateTime
-              dateTime={dateTime().dateTime}
-              extra={dateTime().extra}
-            />
+            <DateTime dateTime={dateTime().dateTime} extra={dateTime().extra} />
           )}
         </Show>
         <Switch>
