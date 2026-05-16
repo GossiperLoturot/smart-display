@@ -1,9 +1,6 @@
 use clap::Parser;
-use warp::Filter;
 
 mod args {
-    pub type SyncArgs = std::sync::Arc<Args>;
-
     #[derive(Debug, Clone, clap::Parser)]
     #[clap(
         name = env!("CARGO_PKG_NAME"),
@@ -22,13 +19,9 @@ mod args {
         pub image_width: u32,
         #[arg(long, default_value = "460")]
         pub image_height: u32,
-        #[arg(long)]
-        pub extra: bool,
-        #[arg(long, required_if_eq("extra", "true"))]
-        pub extra_filepath: Option<std::path::PathBuf>,
-        #[arg(long, required_if_eq("extra", "true"))]
-        pub extra_duration_secs: Option<f32>,
     }
+
+    pub type SharedArgs = std::sync::Arc<Args>;
 }
 
 #[tokio::main]
@@ -36,55 +29,68 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let args = args::Args::parse();
-    let args = std::sync::Arc::new(args);
+    let shared_args = std::sync::Arc::new(args);
 
-    let state = match state::State::read_from_file(&args.state_filepath).await {
+    let state = match state::state_from_fs(&shared_args.state_filepath).await {
         Ok(state) => {
-            tracing::info!("load state file {:?}", args.state_filepath);
+            tracing::info!("load state file {:?}", shared_args.state_filepath);
             tracing::info!("use loaded state file");
             state
         }
         Err(err) => {
             tracing::warn!("failed to load state file {:?}", err);
             tracing::info!("use default state file");
-            state::State::new()
+            state::State::default()
         }
     };
-    let state = std::sync::Arc::new(tokio::sync::Mutex::new(state));
+    let shared_state = std::sync::Arc::new(tokio::sync::Mutex::new(state));
 
-    let image_buffer = image_buffer::ImageBuffer::new();
-    let image_buffer = std::sync::Arc::new(tokio::sync::Mutex::new(image_buffer));
+    let layer = layer::Layer::default();
+    let shared_layer = std::sync::Arc::new(tokio::sync::Mutex::new(layer));
 
-    let filter = polling::handle(state.clone())
-        .or(image_index::handle(state.clone()))
-        .or(image_modify::handle(args.clone(), state.clone()))
-        .or(image_create::handle(args.clone(), state.clone()))
-        .or(image_delete::handle(args.clone(), state.clone()))
-        .or(image_buffer::handle(args.clone(), image_buffer.clone()))
-        .or(warp::fs::dir(args.html.clone()))
-        .or(warp::fs::file(args.html.join("index.html")))
-        .recover(reject::handle)
-        .with(
-            warp::cors()
-                .allow_any_origin()
-                .allow_methods(["GET", "POST"])
-                .allow_headers(["Content-Type"])
-                .build(),
-        );
+    let serve_dir = tower_http::services::ServeDir::new(shared_args.html.clone());
+    let serve_idx = tower_http::services::ServeFile::new(shared_args.html.join("index.html"));
+    let app = axum::Router::new()
+        .route("/polling", axum::routing::get({
+            let state = shared_state.clone();
+            move || polling::handle(state)
+        }))
+        .route("/image-index", axum::routing::get({
+            let state = shared_state.clone();
+            move || image_index::handle(state)
+        }))
+        .route("/image-modify", axum::routing::post({
+            let args = shared_args.clone();
+            let state = shared_state.clone();
+            move |request| image_modify::handle(args, state, request)
+        }))
+        .route("/image-create", axum::routing::post({
+            let args = shared_args.clone();
+            let state = shared_state.clone();
+            move |request| image_create::handle(args, state, request)
+        }))
+        .route("/image-delete", axum::routing::post({
+            let args = shared_args.clone();
+            let state = shared_state.clone();
+            move |request| image_delete::handle(args, state, request)
+        }))
+        .route("/image-get", axum::routing::get({
+            let args = shared_args.clone();
+            let layer = shared_layer.clone();
+            move |request| layer::handle(args, layer, request)
+        }))
+        .fallback_service(serve_dir.fallback(serve_idx));
 
     tracing::info!("start background state routine");
-    tokio::spawn(state::image_shuffling_loop(state.clone()));
-    tokio::spawn(state::extra_fething_loop(args.clone(), state));
+    tokio::spawn(state::update_state(shared_state.clone()));
 
-    tracing::info!("start listening {:?}", args.address);
-    warp::serve(filter).run(args.address).await;
+    tracing::info!("start listening {:?}", shared_args.address);
+    let listener = tokio::net::TcpListener::bind(&shared_args.address).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
 }
 
 mod state {
-    use crate::args;
     use anyhow::Context;
-
-    pub type SyncState = std::sync::Arc<tokio::sync::Mutex<State>>;
 
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -93,41 +99,34 @@ mod state {
         pub image_urls: std::collections::HashSet<String>,
         #[serde(skip)]
         pub image_url: Option<String>,
-        #[serde(skip)]
-        pub extra: Option<Extra>,
     }
 
-    impl State {
-        pub fn new() -> Self {
+    pub type SharedState = std::sync::Arc<tokio::sync::Mutex<State>>;
+
+    impl Default for State {
+        fn default() -> Self {
             Self {
                 duration_secs: 60.0,
                 image_urls: Default::default(),
                 image_url: Default::default(),
-                extra: Default::default(),
             }
-        }
-
-        pub async fn read_from_file(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
-            let buf = tokio::fs::read(path)
-                .await
-                .context("failed to read state from file")?;
-            let slf =
-                serde_json::from_slice(&buf).context("failed to deserialize state from json")?;
-            Ok(slf)
-        }
-
-        pub async fn write_to_file(&self, path: impl AsRef<std::path::Path>) -> anyhow::Result<()> {
-            let buf = serde_json::to_vec(self).context("failed to serialize state to json")?;
-            tokio::fs::write(path, buf)
-                .await
-                .context("failed to write state to file")?;
-            Ok(())
         }
     }
 
-    pub async fn image_shuffling_loop(state: SyncState) {
-        use rand::SeedableRng;
-        let mut rng = rand::rngs::StdRng::from_entropy();
+    pub async fn state_from_fs(path: impl AsRef<std::path::Path>) -> anyhow::Result<State> {
+        let buf = tokio::fs::read(path).await.context("failed to read state from file")?;
+        let state = serde_json::from_slice(&buf).context("failed to deserialize state from json")?;
+        Ok(state)
+    }
+
+    pub async fn state_to_fs(state: &State, path: impl AsRef<std::path::Path>) -> anyhow::Result<()> {
+        let buf = serde_json::to_vec(state).context("failed to serialize state to json")?;
+        tokio::fs::write(path, buf).await.context("failed to write state to file")?;
+        Ok(())
+    }
+
+    pub async fn update_state(state: SharedState) {
+        let mut rng = rand::make_rng::<rand::rngs::StdRng>();
 
         loop {
             let mut state = state.lock().await;
@@ -149,192 +148,90 @@ mod state {
             tokio::time::sleep(duration_secs).await;
         }
     }
-
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct Extra {
-        pub temperature: f32,
-        pub humidity: f32,
-    }
-
-    pub async fn extra_fething_loop(args: args::SyncArgs, state: SyncState) {
-        let path = match args.extra_filepath.as_ref() {
-            Some(path) => {
-                tracing::info!("parse extra file path {:?}", path);
-                path
-            }
-            None => {
-                tracing::info!("no extra file path");
-                return;
-            }
-        };
-
-        let secs = match args.extra_duration_secs {
-            Some(secs) => {
-                tracing::info!("parse extra duration {:?}", secs);
-                std::time::Duration::from_secs_f32(secs)
-            }
-            None => {
-                tracing::info!("no extra duration");
-                return;
-            }
-        };
-
-        loop {
-            let file = match std::fs::File::open(path) {
-                Ok(file) => {
-                    tracing::debug!("success to read extra file {:?}", path);
-                    file
-                }
-                Err(err) => {
-                    tracing::warn!("failed to read extra file {:?}", err);
-                    tokio::time::sleep(secs).await;
-                    continue;
-                }
-            };
-
-            let extra = match serde_json::from_reader::<_, Extra>(file) {
-                Ok(extra) => {
-                    tracing::debug!("success to parse extra {:?}", extra);
-                    extra
-                }
-                Err(err) => {
-                    tracing::warn!("failed to parse extra {:?}", err);
-                    tokio::time::sleep(secs).await;
-                    continue;
-                }
-            };
-
-            let mut state = state.lock().await;
-
-            state.extra = Some(extra);
-
-            drop(state);
-
-            tokio::time::sleep(secs).await;
-        }
-    }
 }
 
 mod polling {
     use crate::state;
-    use warp::Filter;
 
     #[derive(Debug, Clone, serde::Serialize)]
     #[serde(rename_all = "camelCase")]
-    struct Response {
-        date_time: chrono::DateTime<chrono::Local>,
+    pub struct Response {
+        #[serde(with = "time::serde::iso8601")]
+        date_time: time::OffsetDateTime,
         #[serde(skip_serializing_if = "Option::is_none")]
         image_url: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        extra: Option<state::Extra>,
     }
 
-    pub fn handle(
-        state: state::SyncState,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        async fn handle(state: state::SyncState) -> impl warp::Reply {
-            // silent
-            // tracing::info!("hit polling api");
+    pub async fn handle(shared_state: state::SharedState) -> axum::Json<Response> {
+        let state = shared_state.lock().await;
 
-            let state = state.lock().await;
+        let date_time = time::OffsetDateTime::now_local()
+            .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        let image_url = state.image_url.clone();
+        let response = Response { date_time, image_url };
 
-            let response = Response {
-                date_time: chrono::Local::now(),
-                image_url: state.image_url.clone(),
-                extra: state.extra.clone(),
-            };
-
-            warp::reply::json(&response)
-        }
-
-        warp::path("polling")
-            .and(warp::get())
-            .map(move || state.clone())
-            .then(handle)
+        axum::Json(response)
     }
 }
 
-mod image_buffer {
+mod layer {
     use crate::{args, reject};
     use anyhow::Context;
-    use warp::Filter;
 
-    type SyncImageBuffer = std::sync::Arc<tokio::sync::Mutex<ImageBuffer>>;
-
-    pub struct ImageBuffer {
+    #[derive(Debug, Default)]
+    pub struct Layer {
         client: reqwest::Client,
         images: std::collections::HashMap<String, Vec<u8>>,
     }
 
-    impl ImageBuffer {
-        pub fn new() -> Self {
-            Self {
-                client: Default::default(),
-                images: Default::default(),
-            }
-        }
-    }
+    type SharedLayer = std::sync::Arc<tokio::sync::Mutex<Layer>>;
 
     #[derive(Debug, Clone, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct Request {
+    pub struct Request {
         image_url: String,
     }
 
-    pub fn handle(
-        args: args::SyncArgs,
-        image_buffer: SyncImageBuffer,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        async fn handle(
-            request: Request,
-            args: args::SyncArgs,
-            image_buffer: SyncImageBuffer,
-        ) -> Result<impl warp::Reply, warp::Rejection> {
-            tracing::info!("hit image buffer endpoint {:?}", request);
+    pub async fn handle(
+        shared_args: args::SharedArgs,
+        shared_layer: SharedLayer,
+        request: axum::Form<Request>,
+    ) -> Result<axum::response::Response, reject::Rejection> {
+        tracing::info!("hit image buffer endpoint {:?}", request);
 
-            let mut image_buffer = image_buffer.lock().await;
+        let mut layer = shared_layer.lock().await;
 
-            let image = match image_buffer.images.get(&request.image_url) {
-                Some(image) => {
-                    tracing::debug!("use cached image {:?}", request.image_url);
-                    image
-                }
-                None => {
-                    tracing::info!("download new image {:?}", request.image_url);
-                    let image = download_image(
-                        &image_buffer.client,
-                        &request.image_url,
-                        args.image_width,
-                        args.image_height,
-                    )
-                    .await
-                    .map_err(reject::to)?;
+        let image = match layer.images.get(&request.image_url) {
+            Some(image) => {
+                tracing::debug!("use cached image {:?}", request.image_url);
+                image
+            }
+            None => {
+                tracing::info!("download new image {:?}", request.image_url);
+                let image = download_image(
+                    &layer.client,
+                    &request.image_url,
+                    shared_args.image_width,
+                    shared_args.image_height,
+                )
+                .await
+                .map_err(reject::Rejection)?;
 
-                    tracing::debug!("create new cached image {:?}", request.image_url);
-                    image_buffer
-                        .images
-                        .entry(request.image_url)
-                        .or_insert(image)
-                }
-            };
+                tracing::debug!("create new cached image {:?}", request.image_url);
+                layer
+                    .images
+                    .entry(request.image_url.clone())
+                    .or_insert(image)
+            }
+        };
 
-            let response = warp::http::Response::builder()
-                .status(200)
-                .header("Content-Type", "image/webp")
-                .body(image.clone())
-                .context("failed to build http response to reply")
-                .map_err(reject::to)?;
-
-            Ok(response)
-        }
-
-        warp::path("image-get")
-            .and(warp::get())
-            .and(warp::query::<Request>())
-            .map(move |request| (request, args.clone(), image_buffer.clone()))
-            .untuple_one()
-            .and_then(handle)
+        let response = axum::response::Response::builder()
+            .status(200)
+            .header("Content-Type", "image/webp")
+            .body(axum::body::Body::from(image.clone()))
+            .context("failed to build http response to reply")
+            .map_err(reject::Rejection)?;
+        Ok(response)
     }
 
     async fn download_image(
@@ -378,217 +275,147 @@ mod image_buffer {
 
 mod image_index {
     use crate::state;
-    use warp::Filter;
 
     #[derive(Debug, Clone, serde::Serialize)]
     #[serde(rename_all = "camelCase")]
-    struct Response {
+    pub struct Response {
         duration_secs: f32,
         image_urls: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         image_url: Option<String>,
     }
 
-    pub fn handle(
-        state: state::SyncState,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        async fn handle(state: state::SyncState) -> impl warp::Reply {
-            tracing::info!("hit image index api");
+    pub async fn handle(
+        state: state::SharedState,
+    ) -> axum::Json<Response> {
+        tracing::info!("hit image index api");
 
-            let state = state.lock().await;
+        let state = state.lock().await;
 
-            let response = Response {
-                duration_secs: state.duration_secs,
-                image_urls: state.image_urls.iter().cloned().collect::<Vec<_>>(),
-                image_url: state.image_url.clone(),
-            };
+        let response = Response {
+            duration_secs: state.duration_secs,
+            image_urls: state.image_urls.iter().cloned().collect::<Vec<_>>(),
+            image_url: state.image_url.clone(),
+        };
 
-            warp::reply::json(&response)
-        }
-
-        warp::path("image-index")
-            .and(warp::get())
-            .map(move || state.clone())
-            .then(handle)
+        axum::Json(response)
     }
 }
 
 mod image_modify {
     use crate::{args, reject, state};
-    use warp::Filter;
 
     #[derive(Debug, Clone, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct Request {
+    pub struct Request {
         duration_secs: Option<f32>,
         image_url: Option<String>,
     }
 
-    pub fn handle(
-        args: args::SyncArgs,
-        state: state::SyncState,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        async fn handle(
-            request: Request,
-            args: args::SyncArgs,
-            state: state::SyncState,
-        ) -> Result<impl warp::Reply, warp::Rejection> {
-            tracing::info!("hit image modify endpoint {:?}", request);
+    pub async fn handle(
+        args: args::SharedArgs,
+        state: state::SharedState,
+        request: axum::Json<Request>,
+    ) -> Result<axum::http::StatusCode, reject::Rejection> {
+        tracing::info!("hit image modify endpoint {:?}", request);
 
-            let mut state = state.lock().await;
+        let mut state = state.lock().await;
 
-            if let Some(image) = request.image_url {
-                tracing::info!("set current image url {:?}", image);
-                state.image_url = Some(image);
-            }
-
-            if let Some(duration) = request.duration_secs {
-                tracing::info!("set duration {:?}", duration);
-                state.duration_secs = duration;
-            }
-
-            state
-                .write_to_file(&args.state_filepath)
-                .await
-                .map_err(reject::to)?;
-
-            Ok(warp::http::StatusCode::OK)
+        if let Some(image) = request.image_url.clone() {
+            tracing::info!("set current image url {:?}", image);
+            state.image_url = Some(image);
         }
 
-        warp::path("image-modify")
-            .and(warp::post())
-            .and(warp::body::json())
-            .map(move |request| (request, args.clone(), state.clone()))
-            .untuple_one()
-            .and_then(handle)
+        if let Some(duration) = request.duration_secs {
+            tracing::info!("set duration {:?}", duration);
+            state.duration_secs = duration;
+        }
+
+        state::state_to_fs(&state, &args.state_filepath)
+            .await
+            .map_err(reject::Rejection)?;
+
+        Ok(axum::http::StatusCode::OK)
     }
 }
 
 mod image_create {
     use crate::{args, reject, state};
-    use warp::Filter;
 
     #[derive(Debug, Clone, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct Request {
+    pub struct Request {
         image_url: String,
     }
 
-    pub fn handle(
-        args: args::SyncArgs,
-        state: state::SyncState,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        async fn handle(
-            request: Request,
-            args: args::SyncArgs,
-            state: state::SyncState,
-        ) -> Result<impl warp::Reply, warp::Rejection> {
-            tracing::info!("hit image create endpoint {:?}", request);
+    pub async fn handle(
+        args: args::SharedArgs,
+        state: state::SharedState,
+        request: axum::Json<Request>,
+    ) -> Result<axum::http::StatusCode, reject::Rejection> {
+        tracing::info!("hit image create endpoint {:?}", request);
 
-            let mut state = state.lock().await;
+        let mut state = state.lock().await;
 
-            tracing::info!("insert new image url {:?}", request.image_url);
-            state.image_urls.insert(request.image_url);
+        tracing::info!("insert new image url {:?}", request.image_url);
+        state.image_urls.insert(request.image_url.clone());
 
-            state
-                .write_to_file(&args.state_filepath)
-                .await
-                .map_err(reject::to)?;
+        state::state_to_fs(&state, &args.state_filepath)
+            .await
+            .map_err(reject::Rejection)?;
 
-            Ok(warp::http::StatusCode::OK)
-        }
-
-        warp::path("image-create")
-            .and(warp::post())
-            .and(warp::body::json())
-            .map(move |request| (request, args.clone(), state.clone()))
-            .untuple_one()
-            .and_then(handle)
+        Ok(axum::http::StatusCode::OK)
     }
 }
 
 mod image_delete {
     use crate::{args, reject, state};
-    use warp::Filter;
 
     #[derive(Debug, Clone, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct Request {
+    pub struct Request {
         image_url: String,
     }
 
-    pub fn handle(
-        args: args::SyncArgs,
-        state: state::SyncState,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        async fn handle(
-            request: Request,
-            args: args::SyncArgs,
-            state: state::SyncState,
-        ) -> Result<impl warp::Reply, warp::Rejection> {
-            tracing::info!("hit image delete endpoint {:?}", request);
+    pub async fn handle(
+        args: args::SharedArgs,
+        state: state::SharedState,
+        request: axum::Json<Request>,
+    ) -> Result<axum::http::StatusCode, reject::Rejection> {
+        tracing::info!("hit image delete endpoint {:?}", request);
 
-            let mut state = state.lock().await;
+        let mut state = state.lock().await;
 
-            tracing::info!("remove image url {:?}", request.image_url);
-            state.image_urls.remove(&request.image_url);
+        tracing::info!("remove image url {:?}", request.image_url);
+        state.image_urls.remove(&request.image_url);
 
-            state
-                .write_to_file(&args.state_filepath)
-                .await
-                .map_err(reject::to)?;
+        state::state_to_fs(&state, &args.state_filepath)
+            .await
+            .map_err(reject::Rejection)?;
 
-            Ok(warp::http::StatusCode::OK)
-        }
-
-        warp::path("image-delete")
-            .and(warp::post())
-            .and(warp::body::json())
-            .map(move |request| (request, args.clone(), state.clone()))
-            .untuple_one()
-            .and_then(handle)
+        Ok(axum::http::StatusCode::OK)
     }
 }
 
 mod reject {
     #[derive(Debug)]
-    pub struct Rejection(anyhow::Error);
-
-    pub fn to(value: anyhow::Error) -> Rejection {
-        Rejection(value)
-    }
-
-    impl warp::reject::Reject for Rejection {}
+    pub struct Rejection(pub anyhow::Error);
 
     #[derive(Debug, Clone, serde::Serialize)]
     #[serde(rename_all = "camelCase")]
-    struct Response {
+    struct ErrorResponse {
         status_code: u16,
         message: String,
     }
 
-    pub async fn handle(
-        err: warp::Rejection,
-    ) -> Result<impl warp::Reply, std::convert::Infallible> {
-        let status_code;
-        let message;
-
-        if err.is_not_found() {
-            status_code = warp::http::StatusCode::NOT_FOUND;
-            message = "NOT_FOUND".to_string();
-        } else if let Some(err) = err.find::<Rejection>() {
-            status_code = warp::http::StatusCode::BAD_REQUEST;
-            message = err.0.to_string();
-        } else {
-            status_code = warp::http::StatusCode::INTERNAL_SERVER_ERROR;
-            message = "UNHANDLED_REJECTION".to_string();
+    impl axum::response::IntoResponse for Rejection {
+        fn into_response(self) -> axum::response::Response {
+            let status_code = axum::http::StatusCode::BAD_REQUEST;
+            let response = ErrorResponse {
+                status_code: status_code.as_u16(),
+                message: self.0.to_string(),
+            };
+            (status_code, axum::Json(response)).into_response()
         }
-
-        let response = Response {
-            status_code: status_code.as_u16(),
-            message,
-        };
-
-        Ok(warp::reply::json(&response))
     }
 }

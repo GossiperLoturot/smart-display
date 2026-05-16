@@ -1,12 +1,12 @@
 import {
-  type JSX,
-  Match,
-  Show,
-  Switch,
   createEffect,
   createResource,
   createSignal,
+  type JSX,
+  Match,
   onCleanup,
+  Show,
+  Switch,
 } from "solid-js";
 import "./app.css";
 import { Background, Bar, DateTime, Menu, Outline } from "./components";
@@ -51,7 +51,7 @@ export const App = () => {
   const [holdMenu, setHoldMenu] = createSignal<boolean>(false);
 
   createEffect(() => {
-    let handle: number | undefined = undefined;
+    let handle: number | undefined;
 
     const fetchState = () => {
       fetch(`${API_URL}/polling`)

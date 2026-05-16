@@ -1,6 +1,6 @@
 import { format } from "date-fns";
 import * as Icons from "lucide-solid";
-import { For, type JSX, Show, createMemo, createSignal } from "solid-js";
+import { createMemo, createSignal, For, type JSX, Show } from "solid-js";
 import {
   API_URL,
   type ImageCreateRequest,
@@ -161,7 +161,7 @@ export const Menu = (props: MenuProps) => {
               class="active:scale-125 transition"
               onClick={onCreate}
             >
-              <Icons.PlusCircle size={16} />
+              <Icons.CirclePlus size={16} />
             </button>
             <button
               type="button"
@@ -277,7 +277,7 @@ const MenuItem = (props: MenuItemProps) => {
           class="active:scale-125 transition"
           onClick={onDelete}
         >
-          <Icons.MinusCircle size={16} />
+          <Icons.CircleMinus size={16} />
         </button>
       </div>
     </div>
