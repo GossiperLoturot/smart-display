@@ -9,7 +9,7 @@ mod args {
         about = env!("CARGO_PKG_DESCRIPTION"),
     )]
     pub struct Args {
-        #[arg(long, default_value = "./state.json")]
+        #[arg(long, default_value = "./state.bin")]
         pub state_filepath: std::path::PathBuf,
         #[arg(long, default_value = "0.0.0.0:50822")]
         pub address: std::net::SocketAddr,
@@ -45,9 +45,6 @@ async fn main() {
     };
     let shared_state = std::sync::Arc::new(tokio::sync::Mutex::new(state));
 
-    let layer = layer::Layer::default();
-    let shared_layer = std::sync::Arc::new(tokio::sync::Mutex::new(layer));
-
     let serve_dir = tower_http::services::ServeDir::new(shared_args.html.clone());
     let serve_idx = tower_http::services::ServeFile::new(shared_args.html.join("index.html"));
     let app = axum::Router::new()
@@ -75,9 +72,8 @@ async fn main() {
             move |request| image_delete::handle(args, state, request)
         }))
         .route("/image-get", axum::routing::get({
-            let args = shared_args.clone();
-            let layer = shared_layer.clone();
-            move |request| layer::handle(args, layer, request)
+            let state = shared_state.clone();
+            move |request| image_get::handle(state, request)
         }))
         .fallback_service(serve_dir.fallback(serve_idx));
 
@@ -96,9 +92,9 @@ mod state {
     #[serde(rename_all = "camelCase")]
     pub struct State {
         pub duration_secs: f32,
-        pub image_urls: std::collections::HashSet<String>,
+        pub image_kvs: std::collections::HashMap<uuid::Uuid, Vec<u8>>,
         #[serde(skip)]
-        pub image_url: Option<String>,
+        pub image_key: Option<uuid::Uuid>,
     }
 
     pub type SharedState = std::sync::Arc<tokio::sync::Mutex<State>>;
@@ -107,20 +103,20 @@ mod state {
         fn default() -> Self {
             Self {
                 duration_secs: 60.0,
-                image_urls: Default::default(),
-                image_url: Default::default(),
+                image_kvs: Default::default(),
+                image_key: Default::default(),
             }
         }
     }
 
     pub async fn state_from_fs(path: impl AsRef<std::path::Path>) -> anyhow::Result<State> {
         let buf = tokio::fs::read(path).await.context("failed to read state from file")?;
-        let state = serde_json::from_slice(&buf).context("failed to deserialize state from json")?;
+        let state = postcard::from_bytes(&buf).context("failed to deserialize state from bin")?;
         Ok(state)
     }
 
     pub async fn state_to_fs(state: &State, path: impl AsRef<std::path::Path>) -> anyhow::Result<()> {
-        let buf = serde_json::to_vec(state).context("failed to serialize state to json")?;
+        let buf = postcard::to_allocvec(state).context("failed to serialize state to bin")?;
         tokio::fs::write(path, buf).await.context("failed to write state to file")?;
         Ok(())
     }
@@ -131,13 +127,13 @@ mod state {
         loop {
             let mut state = state.lock().await;
 
-            match rand::seq::IteratorRandom::choose(state.image_urls.iter(), &mut rng) {
-                Some(image_url) => {
-                    tracing::debug!("success to set image url {:?}", image_url);
-                    state.image_url = Some(image_url.clone());
+            match rand::seq::IteratorRandom::choose(state.image_kvs.keys(), &mut rng) {
+                Some(image_key) => {
+                    tracing::debug!("success to set image key {:?}", image_key);
+                    state.image_key = Some(*image_key);
                 }
                 None => {
-                    tracing::debug!("failed to set image url");
+                    tracing::debug!("failed to set image key");
                 }
             }
 
@@ -159,7 +155,7 @@ mod polling {
         #[serde(with = "time::serde::iso8601")]
         date_time: time::OffsetDateTime,
         #[serde(skip_serializing_if = "Option::is_none")]
-        image_url: Option<String>,
+        image_key: Option<uuid::Uuid>,
     }
 
     pub async fn handle(shared_state: state::SharedState) -> axum::Json<Response> {
@@ -167,109 +163,10 @@ mod polling {
 
         let date_time = time::OffsetDateTime::now_local()
             .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-        let image_url = state.image_url.clone();
-        let response = Response { date_time, image_url };
+        let image_key = state.image_key;
+        let response = Response { date_time, image_key };
 
         axum::Json(response)
-    }
-}
-
-mod layer {
-    use crate::{args, reject};
-    use anyhow::Context;
-
-    #[derive(Debug, Default)]
-    pub struct Layer {
-        client: reqwest::Client,
-        images: std::collections::HashMap<String, Vec<u8>>,
-    }
-
-    type SharedLayer = std::sync::Arc<tokio::sync::Mutex<Layer>>;
-
-    #[derive(Debug, Clone, serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct Request {
-        image_url: String,
-    }
-
-    pub async fn handle(
-        shared_args: args::SharedArgs,
-        shared_layer: SharedLayer,
-        request: axum::Form<Request>,
-    ) -> Result<axum::response::Response, reject::Rejection> {
-        tracing::info!("hit image buffer endpoint {:?}", request);
-
-        let mut layer = shared_layer.lock().await;
-
-        let image = match layer.images.get(&request.image_url) {
-            Some(image) => {
-                tracing::debug!("use cached image {:?}", request.image_url);
-                image
-            }
-            None => {
-                tracing::info!("download new image {:?}", request.image_url);
-                let image = download_image(
-                    &layer.client,
-                    &request.image_url,
-                    shared_args.image_width,
-                    shared_args.image_height,
-                )
-                .await
-                .map_err(reject::Rejection)?;
-
-                tracing::debug!("create new cached image {:?}", request.image_url);
-                layer
-                    .images
-                    .entry(request.image_url.clone())
-                    .or_insert(image)
-            }
-        };
-
-        let response = axum::response::Response::builder()
-            .status(200)
-            .header("Content-Type", "image/webp")
-            .body(axum::body::Body::from(image.clone()))
-            .context("failed to build http response to reply")
-            .map_err(reject::Rejection)?;
-        Ok(response)
-    }
-
-    async fn download_image(
-        client: &reqwest::Client,
-        image_url: &str,
-        image_width: u32,
-        image_height: u32,
-    ) -> anyhow::Result<Vec<u8>> {
-        let response = client
-            .get(image_url)
-            .send()
-            .await
-            .context("failed to get http response")?;
-
-        let is_image = response
-            .headers()
-            .get("Content-Type")
-            .map(|value| value.as_bytes().starts_with(b"image/"))
-            .unwrap_or_default();
-
-        anyhow::ensure!(is_image, "http content type must be image/*");
-
-        let bytes = response
-            .bytes()
-            .await
-            .context("failed to get http response body")?;
-        let image = image::load_from_memory(&bytes)
-            .context("failed to load image from http response body")?;
-
-        let mut buf = std::io::Cursor::new(vec![]);
-        image
-            .resize_to_fill(image_width, image_height, image::imageops::CatmullRom)
-            .write_to(&mut buf, image::ImageFormat::WebP)
-            .context("failed to encode into webp from image")?;
-        let bytes = buf.into_inner();
-        tracing::info!("encoded image size {:?} bytes", bytes.len());
-
-        Ok(bytes)
     }
 }
 
@@ -280,9 +177,9 @@ mod image_index {
     #[serde(rename_all = "camelCase")]
     pub struct Response {
         duration_secs: f32,
-        image_urls: Vec<String>,
+        image_keys: Vec<uuid::Uuid>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        image_url: Option<String>,
+        image_key: Option<uuid::Uuid>,
     }
 
     pub async fn handle(
@@ -294,11 +191,98 @@ mod image_index {
 
         let response = Response {
             duration_secs: state.duration_secs,
-            image_urls: state.image_urls.iter().cloned().collect::<Vec<_>>(),
-            image_url: state.image_url.clone(),
+            image_keys: state.image_kvs.keys().copied().collect::<Vec<_>>(),
+            image_key: state.image_key,
         };
 
         axum::Json(response)
+    }
+}
+
+mod image_get {
+    use crate::{reject, state};
+    use anyhow::Context;
+
+    #[derive(Debug, Clone, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Request {
+        image_key: uuid::Uuid,
+    }
+
+    pub async fn handle(
+        shared_state: state::SharedState,
+        request: axum::Form<Request>,
+    ) -> Result<axum::response::Response, reject::Rejection> {
+        tracing::info!("hit image buffer endpoint {:?}", request);
+
+        let state = shared_state.lock().await;
+
+        let image = state.image_kvs
+            .get(&request.image_key)
+            .context("failed to get image")
+            .map_err(reject::Rejection)?;
+
+        let response = axum::response::Response::builder()
+            .status(200)
+            .header("Content-Type", "image/webp")
+            .body(axum::body::Body::from(image.clone()))
+            .context("failed to build http response to reply")
+            .map_err(reject::Rejection)?;
+        Ok(response)
+    }
+}
+
+mod image_create {
+    use crate::{args, reject, state};
+    use anyhow::Context;
+
+    pub async fn handle(
+        args: args::SharedArgs,
+        state: state::SharedState,
+        mut request: axum::extract::Multipart,
+    ) -> Result<axum::http::StatusCode, reject::Rejection> {
+        tracing::info!("hit image create endpoint {:?}", request);
+
+        let mut state = state.lock().await;
+
+        tracing::info!("insert new image");
+        let mut image_bytes = None;
+        while let Some(field) = request.next_field()
+            .await
+            .context("failed to read multipart field")
+            .map_err(reject::Rejection)?
+        {
+            if field.name() == Some("image") {
+                let data = field.bytes()
+                    .await
+                    .context("failed to read multipart data")
+                    .map_err(reject::Rejection)?;
+                image_bytes = Some(data);
+            }
+        }
+        let image_bytes = image_bytes
+            .context("failed to find to image")
+            .map_err(reject::Rejection)?;
+        tracing::info!("read image binary (size: {})", image_bytes.len());
+        let image = image::load_from_memory(&image_bytes)
+            .context("failed to load image from http response body")
+            .map_err(reject::Rejection)?;
+        let mut buf = std::io::Cursor::new(vec![]);
+        image
+            .resize_to_fill(args.image_width, args.image_height, image::imageops::CatmullRom)
+            .write_to(&mut buf, image::ImageFormat::WebP)
+            .context("failed to encode into webp from image")
+            .map_err(reject::Rejection)?;
+        let image_bytes = buf.into_inner();
+        tracing::info!("encoded image size {:?} bytes", image_bytes.len());
+
+        let image_key = uuid::Uuid::new_v4();
+        state.image_kvs.insert(image_key, image_bytes);
+        state::state_to_fs(&state, &args.state_filepath)
+            .await
+            .map_err(reject::Rejection)?;
+
+        Ok(axum::http::StatusCode::OK)
     }
 }
 
@@ -309,7 +293,7 @@ mod image_modify {
     #[serde(rename_all = "camelCase")]
     pub struct Request {
         duration_secs: Option<f32>,
-        image_url: Option<String>,
+        image_key: Option<uuid::Uuid>,
     }
 
     pub async fn handle(
@@ -321,9 +305,9 @@ mod image_modify {
 
         let mut state = state.lock().await;
 
-        if let Some(image) = request.image_url.clone() {
-            tracing::info!("set current image url {:?}", image);
-            state.image_url = Some(image);
+        if let Some(image_key) = request.image_key {
+            tracing::info!("set current image key {:?}", image_key);
+            state.image_key = Some(image_key);
         }
 
         if let Some(duration) = request.duration_secs {
@@ -339,42 +323,13 @@ mod image_modify {
     }
 }
 
-mod image_create {
-    use crate::{args, reject, state};
-
-    #[derive(Debug, Clone, serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct Request {
-        image_url: String,
-    }
-
-    pub async fn handle(
-        args: args::SharedArgs,
-        state: state::SharedState,
-        request: axum::Json<Request>,
-    ) -> Result<axum::http::StatusCode, reject::Rejection> {
-        tracing::info!("hit image create endpoint {:?}", request);
-
-        let mut state = state.lock().await;
-
-        tracing::info!("insert new image url {:?}", request.image_url);
-        state.image_urls.insert(request.image_url.clone());
-
-        state::state_to_fs(&state, &args.state_filepath)
-            .await
-            .map_err(reject::Rejection)?;
-
-        Ok(axum::http::StatusCode::OK)
-    }
-}
-
 mod image_delete {
     use crate::{args, reject, state};
 
     #[derive(Debug, Clone, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Request {
-        image_url: String,
+        image_key: uuid::Uuid,
     }
 
     pub async fn handle(
@@ -386,8 +341,8 @@ mod image_delete {
 
         let mut state = state.lock().await;
 
-        tracing::info!("remove image url {:?}", request.image_url);
-        state.image_urls.remove(&request.image_url);
+        tracing::info!("remove image key {:?}", request.image_key);
+        state.image_kvs.remove(&request.image_key);
 
         state::state_to_fs(&state, &args.state_filepath)
             .await

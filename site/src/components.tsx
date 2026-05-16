@@ -1,6 +1,6 @@
 import { format } from "date-fns";
 import * as Icons from "lucide-solid";
-import { createMemo, createSignal, For, type JSX, Show } from "solid-js";
+import { createMemo, createSignal, For, type JSX } from "solid-js";
 import {
   API_URL,
   type ImageCreateRequest,
@@ -10,15 +10,15 @@ import {
 } from "./app";
 
 export interface BackgroundProps {
-  imageUrl: string;
+  imageKey: string;
 }
 
 export const Background = (props: BackgroundProps) => {
-  const imageUrl = createMemo(() => props.imageUrl);
+  const imageKey = createMemo(() => props.imageKey);
 
   return (
     <img
-      src={`${API_URL}/image-get?imageUrl=${imageUrl()}`}
+      src={`${API_URL}/image-get?imageKey=${imageKey()}`}
       alt="background"
       class="absolute inset-0 object-cover brightness-75"
     />
@@ -27,12 +27,6 @@ export const Background = (props: BackgroundProps) => {
 
 export interface DateTimeProps {
   dateTime: string;
-  extra:
-    | {
-        temperature: number;
-        humidity: number;
-      }
-    | undefined;
 }
 
 export const DateTime = (props: DateTimeProps) => {
@@ -41,15 +35,6 @@ export const DateTime = (props: DateTimeProps) => {
     const dateString = format(now, "yyyy-MM-dd EEE");
     const timeString = format(now, "HH:mm:ss");
     return { dateString, timeString };
-  });
-
-  const extraStrings = createMemo(() => {
-    if (props.extra) {
-      const temperatureString = `${props.extra.temperature.toFixed(1)}℃`;
-      const humidityString = `${props.extra.humidity.toFixed(1)}%RH`;
-      return { temperatureString, humidityString };
-    }
-    return;
   });
 
   return (
@@ -63,21 +48,6 @@ export const DateTime = (props: DateTimeProps) => {
         {/* Time text line */}
         <div class="text-[176px] leading-[1.2] drop-shadow-[0_4px_16px_rgba(0,0,0,0.25)]">
           {dateTimeStrings().timeString}
-        </div>
-
-        {/* Sensor text line */}
-        <div class="text-[56px] leading-[1.2] font-bold drop-shadow-[0_4px_8px_rgba(0,0,0,0.25)]">
-          <Show
-            when={extraStrings()}
-            fallback={<div class="invisible">INVISIBLE</div>}
-          >
-            {(extraStrings) => (
-              <div class="flex justify-evenly">
-                <div>{extraStrings().temperatureString}</div>
-                <div>{extraStrings().humidityString}</div>
-              </div>
-            )}
-          </Show>
         </div>
       </div>
     </div>
@@ -120,20 +90,21 @@ export interface MenuProps {
 }
 
 export const Menu = (props: MenuProps) => {
-  const [search, setSearch] = createSignal("");
+  const [uploadFile, setUploadFile] = createSignal<File | null>(null);
   const [timer, setTimer] = createSignal("");
 
   const onCreate = () => {
-    return props.onCreate({ imageUrl: search() });
-  };
-
-  const onModifyImage = () => {
-    return props.onModify({ imageUrl: search(), durationSecs: undefined });
+    const file = uploadFile();
+    if (file) {
+      props.onCreate({ image: file }).then(() => {
+        setUploadFile(null);
+      });
+    }
   };
 
   const onModifyTimer = () => {
     const durationSecs = Number.parseFloat(timer());
-    return props.onModify({ imageUrl: undefined, durationSecs });
+    return props.onModify({ imageKey: undefined, durationSecs });
   };
 
   return (
@@ -144,31 +115,25 @@ export const Menu = (props: MenuProps) => {
           {/* Title */}
           <div class="text-[24px] font-bold">Images</div>
 
-          {/* Search box */}
+          {/* Upload box */}
           <div class="flex items-center gap-[8px] px-[8px] py-[4px] bg-[#EEE] rounded-full">
-            <Icons.Link size={16} />
+            <Icons.ImagePlus size={16} />
             <input
-              type="url"
-              class="w-[300px] text-[16px] placeholder-[#888] bg-transparent focus:outline-none"
-              placeholder={
-                props.imageIndex.imageUrl ?? "https://example.com/image.jpg"
-              }
-              value={search()}
-              onInput={(event) => setSearch(event.currentTarget.value)}
+              type="file"
+              accept="image/*"
+              class="w-[300px] text-[16px] bg-transparent focus:outline-none"
+              onInput={(event) => {
+                const file = event.currentTarget.files?.[0];
+                if (file) setUploadFile(file);
+              }}
             />
             <button
               type="button"
               class="active:scale-125 transition"
               onClick={onCreate}
+              disabled={!uploadFile()}
             >
-              <Icons.CirclePlus size={16} />
-            </button>
-            <button
-              type="button"
-              class="active:scale-125 transition"
-              onClick={onModifyImage}
-            >
-              <Icons.CircleCheck size={16} />
+              <Icons.Upload size={16} />
             </button>
           </div>
 
@@ -204,10 +169,10 @@ export const Menu = (props: MenuProps) => {
         {/* Image list */}
         <div class="flex-grow overflow-auto">
           <div class="flex flex-col gap-[16px] p-[16px]">
-            <For each={props.imageIndex.imageUrls}>
-              {(imageUrl) => (
+            <For each={props.imageIndex.imageKeys}>
+              {(imageKey) => (
                 <MenuItem
-                  imageUrl={imageUrl}
+                  imageKey={imageKey}
                   onModify={props.onModify}
                   onDelete={props.onDelete}
                 />
@@ -221,37 +186,37 @@ export const Menu = (props: MenuProps) => {
 };
 
 export interface MenuItemProps {
-  imageUrl: string;
+  imageKey: string;
   onModify: (request: ImageModifyRequest) => Promise<void>;
   onDelete: (request: ImageDeleteRequest) => Promise<void>;
 }
 
 const MenuItem = (props: MenuItemProps) => {
-  const imageUrl = createMemo(() => props.imageUrl);
+  const imageKey = createMemo(() => props.imageKey);
 
   const onCopy = () => {
-    navigator.clipboard.writeText(imageUrl());
+    navigator.clipboard.writeText(imageKey());
   };
 
   const onModifyImage = () => {
-    props.onModify({ imageUrl: imageUrl(), durationSecs: undefined });
+    props.onModify({ imageKey: imageKey(), durationSecs: undefined });
   };
 
   const onDelete = () => {
-    props.onDelete({ imageUrl: imageUrl() });
+    props.onDelete({ imageKey: imageKey() });
   };
 
   return (
     <div
       class="p-[8px] h-[64px] mx-auto flex rounded-[8px] relative z-[10]"
       style={{
-        "background-image": `url(${API_URL}/image-get?imageUrl=${imageUrl()})`,
+        "background-image": `url(${API_URL}/image-get?imageKey=${imageKey()})`,
       }}
     >
       <div class="absolute inset-0 bg-[rgba(0,0,0,0.25)] z-[-1] rounded-[8px]" />
       <div class="text-white flex items-center gap-[8px] px-[8px] py-[4px] mt-auto">
         {/* URL text line */}
-        <div class="w-[500px] truncate">{imageUrl()}</div>
+        <div class="w-[500px] truncate">{imageKey()}</div>
 
         {/* Copy */}
         <button

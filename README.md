@@ -29,9 +29,7 @@ VITE_POLLING_INTERVAL=250 bun run build
 cargo run --release
 
 # With extra data file
-cargo run --release -- --extra \
-    --extra-filepath /path/to/extra.json \
-    --extra-duration-secs 60
+cargo run --release -- --state-filepath /path/to/state.json
 ```
 
 ### Server Command Options
@@ -43,20 +41,6 @@ cargo run --release -- --extra \
 |html|The web page served by the server|./html|
 |image-width|Image width when saving image to buffer|780|
 |image-height|Image height when saving image to buffer|460|
-|extra|Whether to read extra data file||
-|extra-filepath|extra data file path||
-|extra-duration-secs|A millisecond interval to read extra data file||
-
-#### Structure of Extra Data
-
-Currently, extra data only contains temperature and humidity.
-
-```json
-{
-    "temperature": 25.0,
-    "humidity": 40.5
-}
-```
 
 ### Web Page Environment Variables
 

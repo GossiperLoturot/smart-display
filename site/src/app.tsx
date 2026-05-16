@@ -18,32 +18,26 @@ export const POLLING_INTERVAL = import.meta.env.VITE_POLLING_INTERVAL || 250;
 
 export interface PollingResponse {
   dateTime: string;
-  extra:
-    | {
-        temperature: number;
-        humidity: number;
-      }
-    | undefined;
-  imageUrl: string | undefined;
+  imageKey: string | undefined;
 }
 
 export interface ImageIndexResponse {
   durationSecs: number;
-  imageUrls: string[];
-  imageUrl: string | undefined;
+  imageKeys: string[];
+  imageKey: string | undefined;
 }
 
 export interface ImageModifyRequest {
   durationSecs: number | undefined;
-  imageUrl: string | undefined;
+  imageKey: string | undefined;
 }
 
 export interface ImageCreateRequest {
-  imageUrl: string;
+  image: File;
 }
 
 export interface ImageDeleteRequest {
-  imageUrl: string;
+  imageKey: string;
 }
 
 export const App = () => {
@@ -86,12 +80,11 @@ export const App = () => {
   };
 
   const onCreate = async (request: ImageCreateRequest) => {
+    const form = new FormData();
+    form.append("image", request.image);
     await fetch(`${API_URL}/image-create`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(request),
+      body: form,
     });
     await refetch();
   };
@@ -107,13 +100,12 @@ export const App = () => {
     await refetch();
   };
 
-  const imageUrlState = () => polling()?.imageUrl;
+  const imageKeyState = () => polling()?.imageKey;
   const dateTimeState = () => {
     const pollingValue = polling();
     if (pollingValue?.dateTime) {
       return {
         dateTime: pollingValue.dateTime,
-        extra: pollingValue.extra,
       };
     }
     return;
@@ -129,13 +121,11 @@ export const App = () => {
   return (
     <div class="w-screen h-screen flex">
       <div class="m-auto relative" style={containerStyle}>
-        <Show when={imageUrlState()}>
-          {(imageUrl) => <Background imageUrl={imageUrl()} />}
+        <Show when={imageKeyState()}>
+          {(imageKey) => <Background imageKey={imageKey()} />}
         </Show>
         <Show when={dateTimeState()}>
-          {(dateTime) => (
-            <DateTime dateTime={dateTime().dateTime} extra={dateTime().extra} />
-          )}
+          {(dateTime) => <DateTime dateTime={dateTime().dateTime} />}
         </Show>
         <Switch>
           <Match when={!holdMenu()}>
