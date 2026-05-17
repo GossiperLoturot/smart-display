@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::Parser;
 
 mod args {
@@ -9,8 +10,8 @@ mod args {
         about = env!("CARGO_PKG_DESCRIPTION"),
     )]
     pub struct Args {
-        #[arg(long, default_value = "./state.bin")]
-        pub state_filepath: std::path::PathBuf,
+        #[arg(long, default_value = "sqlite:state.db")]
+        pub database_url: String,
         #[arg(long, default_value = "0.0.0.0:50822")]
         pub address: std::net::SocketAddr,
         #[arg(long, default_value = "./html")]
@@ -25,25 +26,15 @@ mod args {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
+    tracing::info!("starting server.");
 
     let args = args::Args::parse();
     let shared_args = std::sync::Arc::new(args);
 
-    let state = match state::state_from_fs(&shared_args.state_filepath).await {
-        Ok(state) => {
-            tracing::info!("load state file {:?}", shared_args.state_filepath);
-            tracing::info!("use loaded state file");
-            state
-        }
-        Err(err) => {
-            tracing::warn!("failed to load state file {:?}", err);
-            tracing::info!("use default state file");
-            state::State::default()
-        }
-    };
-    let shared_state = std::sync::Arc::new(tokio::sync::Mutex::new(state));
+    let state = state::State::try_new(&shared_args).await?;
+    let shared_state = std::sync::Arc::new(state);
 
     let serve_dir = tower_http::services::ServeDir::new(shared_args.html.clone());
     let serve_idx = tower_http::services::ServeFile::new(shared_args.html.join("index.html"));
@@ -57,9 +48,8 @@ async fn main() {
             move || image_index::handle(state)
         }))
         .route("/image-modify", axum::routing::post({
-            let args = shared_args.clone();
             let state = shared_state.clone();
-            move |request| image_modify::handle(args, state, request)
+            move |request| image_modify::handle(state, request)
         }))
         .route("/image-create", axum::routing::post({
             let args = shared_args.clone();
@@ -67,87 +57,189 @@ async fn main() {
             move |request| image_create::handle(args, state, request)
         }))
         .route("/image-delete", axum::routing::post({
-            let args = shared_args.clone();
             let state = shared_state.clone();
-            move |request| image_delete::handle(args, state, request)
+            move |request| image_delete::handle(state, request)
         }))
         .route("/image-get", axum::routing::get({
             let state = shared_state.clone();
             move |request| image_get::handle(state, request)
         }))
-        .fallback_service(serve_dir.fallback(serve_idx));
+        .fallback_service(serve_dir.fallback(serve_idx))
+        .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024));
 
-    tracing::info!("start background state routine");
+    tracing::info!("start background state routine.");
     tokio::spawn(state::update_state(shared_state.clone()));
 
-    tracing::info!("start listening {:?}", shared_args.address);
-    let listener = tokio::net::TcpListener::bind(&shared_args.address).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    tracing::info!("listening on {}", shared_args.address);
+    let listener = tokio::net::TcpListener::bind(&shared_args.address)
+        .await
+        .context("failed to bind tcp listener.")?;
+    axum::serve(listener, app)
+        .await
+        .context("failed to execute server.")?;
+    Ok(())
 }
 
 mod state {
-    use anyhow::Context;
+    use std::str::FromStr as _;
+    use anyhow::Context as _;
+    use crate::args;
 
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
+    #[derive(Debug, Clone)]
     pub struct State {
-        pub duration_secs: f32,
-        pub image_kvs: std::collections::HashMap<uuid::Uuid, Vec<u8>>,
-        #[serde(skip)]
-        pub image_key: Option<uuid::Uuid>,
+        client: sqlx::SqlitePool
     }
 
-    pub type SharedState = std::sync::Arc<tokio::sync::Mutex<State>>;
+    pub type SharedState = std::sync::Arc<State>;
 
-    impl Default for State {
-        fn default() -> Self {
-            Self {
-                duration_secs: 60.0,
-                image_kvs: Default::default(),
-                image_key: Default::default(),
-            }
+    impl State {
+        pub async fn try_new(args: &args::Args) -> anyhow::Result<Self> {
+            tracing::info!("connecting to database: {}", args.database_url);
+            let opt = sqlx::sqlite::SqliteConnectOptions::from_str(&args.database_url)?
+                .foreign_keys(true)
+                .create_if_missing(true);
+            let client = sqlx::SqlitePool::connect_with(opt).await?;
+            tracing::info!("successfully connected to database.");
+
+            // migration
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    duration_secs REAL NOT NULL,
+                    current_image_id TEXT,
+                    FOREIGN KEY(current_image_id) REFERENCES images(id) ON DELETE SET NULL
+                )"
+            )
+                .execute(&client)
+                .await
+                .context("failed to create state table.")?;
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS images (
+                    id TEXT PRIMARY KEY,
+                    bytes BLOB NOT NULL,
+                    created_at INTEGER NOT NULL
+                )"
+            )
+                .execute(&client)
+                .await
+                .context("failed to create images table.")?;
+            sqlx::query("INSERT OR IGNORE INTO state (id, duration_secs, current_image_id) VALUES (1, 60.0, NULL)")
+                .execute(&client)
+                .await
+                .context("failed to initialize state.")?;
+            tracing::info!("database migration completed.");
+
+            Ok(State { client })
         }
-    }
 
-    pub async fn state_from_fs(path: impl AsRef<std::path::Path>) -> anyhow::Result<State> {
-        let buf = tokio::fs::read(path).await.context("failed to read state from file")?;
-        let state = postcard::from_bytes(&buf).context("failed to deserialize state from bin")?;
-        Ok(state)
-    }
+        pub async fn duration_secs(&self) -> anyhow::Result<f64> {
+            let row: (f64,) = sqlx::query_as("SELECT duration_secs FROM state WHERE id = 1")
+                .fetch_one(&self.client)
+                .await?;
+            Ok(row.0)
+        }
 
-    pub async fn state_to_fs(state: &State, path: impl AsRef<std::path::Path>) -> anyhow::Result<()> {
-        let buf = postcard::to_allocvec(state).context("failed to serialize state to bin")?;
-        tokio::fs::write(path, buf).await.context("failed to write state to file")?;
-        Ok(())
+        pub async fn set_duration_secs(&self, value: f64) -> anyhow::Result<()> {
+            sqlx::query("UPDATE state SET duration_secs = $1 WHERE id = 1")
+                .bind(value)
+                .execute(&self.client)
+                .await?;
+            Ok(())
+        }
+
+        pub async fn current_image_id(&self) -> anyhow::Result<Option<uuid::Uuid>> {
+            let row: (Option<uuid::Uuid>,) = sqlx::query_as("SELECT current_image_id FROM state WHERE id = 1")
+                .fetch_one(&self.client)
+                .await?;
+            Ok(row.0)
+        }
+
+        pub async fn set_current_image_id(&self, value: Option<uuid::Uuid>) -> anyhow::Result<()> {
+            sqlx::query("UPDATE state SET current_image_id = $1 WHERE id = 1")
+                .bind(value)
+                .execute(&self.client)
+                .await?;
+            Ok(())
+        }
+
+        pub async fn image_ids(&self) -> anyhow::Result<Vec<uuid::Uuid>> {
+            let rows: Vec<(uuid::Uuid,)> = sqlx::query_as("SELECT id FROM images ORDER BY created_at DESC")
+                .fetch_all(&self.client)
+                .await?;
+            let image_ids = rows.into_iter().map(|(image_id,)| image_id).collect();
+            Ok(image_ids)
+        }
+
+        pub async fn get_image(&self, image_id: uuid::Uuid) -> anyhow::Result<Vec<u8>> {
+            let row: (Vec<u8>,) = sqlx::query_as("SELECT bytes FROM images WHERE id = $1")
+                .bind(image_id)
+                .fetch_one(&self.client)
+                .await?;
+            Ok(row.0)
+        }
+
+        pub async fn insert_image(&self, id: uuid::Uuid, bytes: Vec<u8>) -> anyhow::Result<()> {
+            sqlx::query("INSERT INTO images (id, bytes, created_at) VALUES ($1, $2, strftime('%s', 'now'))")
+                .bind(id)
+                .bind(bytes)
+                .execute(&self.client)
+                .await?;
+            Ok(())
+        }
+
+        pub async fn remove_image(&self, id: uuid::Uuid) -> anyhow::Result<()> {
+            sqlx::query("DELETE FROM images WHERE id = $1")
+                .bind(id)
+                .execute(&self.client)
+                .await?;
+            Ok(())
+        }
     }
 
     pub async fn update_state(state: SharedState) {
         let mut rng = rand::make_rng::<rand::rngs::StdRng>();
 
         loop {
-            let mut state = state.lock().await;
+            // attempt to fetch image ids.
+            let image_ids = match state.image_ids().await {
+                Ok(image_ids) => image_ids,
+                Err(e) => {
+                    tracing::error!("failed to fetch image ids: {:#}", e);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
 
-            match rand::seq::IteratorRandom::choose(state.image_kvs.keys(), &mut rng) {
-                Some(image_key) => {
-                    tracing::debug!("success to set image key {:?}", image_key);
-                    state.image_key = Some(*image_key);
+            // choose random image.
+            match rand::seq::IteratorRandom::choose(image_ids.into_iter(), &mut rng) {
+                Some(image_id) => {
+                    tracing::info!("successfully updated current image id: {}", image_id);
+                    state.set_current_image_id(Some(image_id)).await.unwrap();
                 }
                 None => {
-                    tracing::debug!("failed to set image key");
+                    tracing::warn!("failed to update image id.");
                 }
             }
 
-            let duration_secs = std::time::Duration::from_secs_f32(state.duration_secs);
+            // attempt to fetch duration secs.
+            let duration_secs = match state.duration_secs().await {
+                Ok(duration_secs) => duration_secs,
+                Err(e) => {
+                    tracing::error!("failed to fetch duration secs: {:#}", e);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
 
-            drop(state);
-
-            tokio::time::sleep(duration_secs).await;
+            // sleep until next time.
+            tokio::time::sleep(std::time::Duration::from_secs_f64(duration_secs)).await;
         }
     }
 }
 
 mod polling {
-    use crate::state;
+    use anyhow::Context as _;
+    use crate::{reject, state};
 
     #[derive(Debug, Clone, serde::Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -155,72 +247,67 @@ mod polling {
         #[serde(with = "time::serde::iso8601")]
         date_time: time::OffsetDateTime,
         #[serde(skip_serializing_if = "Option::is_none")]
-        image_key: Option<uuid::Uuid>,
+        current_image_id: Option<uuid::Uuid>,
     }
 
-    pub async fn handle(shared_state: state::SharedState) -> axum::Json<Response> {
-        let state = shared_state.lock().await;
+    pub async fn handle(state: state::SharedState) -> anyhow::Result<axum::Json<Response>, reject::Rejection> {
+        // tracing::debug!("handling polling request.");
 
         let date_time = time::OffsetDateTime::now_local()
-            .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-        let image_key = state.image_key;
-        let response = Response { date_time, image_key };
+            .context("failed to get local time.")
+            .map_err(reject::Rejection)?;
+        let current_image_id = state.current_image_id().await.map_err(reject::Rejection)?;
+        let response = Response { date_time, current_image_id };
 
-        axum::Json(response)
+        Ok(axum::Json(response))
     }
 }
 
 mod image_index {
-    use crate::state;
+    use crate::{reject, state};
 
     #[derive(Debug, Clone, serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Response {
-        duration_secs: f32,
-        image_keys: Vec<uuid::Uuid>,
+        duration_secs: f64,
+        image_ids: Vec<uuid::Uuid>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        image_key: Option<uuid::Uuid>,
+        current_image_id: Option<uuid::Uuid>,
     }
 
-    pub async fn handle(
-        state: state::SharedState,
-    ) -> axum::Json<Response> {
-        tracing::info!("hit image index api");
+    pub async fn handle(state: state::SharedState) -> anyhow::Result<axum::Json<Response>, reject::Rejection> {
+        tracing::info!("handling image index request.");
 
-        let state = state.lock().await;
-
+        let duration_secs = state.duration_secs().await.map_err(reject::Rejection)?;
+        let current_image_id = state.current_image_id().await.map_err(reject::Rejection)?;
+        let image_ids = state.image_ids().await.map_err(reject::Rejection)?;
         let response = Response {
-            duration_secs: state.duration_secs,
-            image_keys: state.image_kvs.keys().copied().collect::<Vec<_>>(),
-            image_key: state.image_key,
+            duration_secs,
+            current_image_id,
+            image_ids,
         };
 
-        axum::Json(response)
+        Ok(axum::Json(response))
     }
 }
 
 mod image_get {
+    use anyhow::Context as _;
     use crate::{reject, state};
-    use anyhow::Context;
 
     #[derive(Debug, Clone, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Request {
-        image_key: uuid::Uuid,
+        image_id: uuid::Uuid,
     }
 
     pub async fn handle(
-        shared_state: state::SharedState,
-        request: axum::Form<Request>,
+        state: state::SharedState,
+        request: axum::extract::Query<Request>,
     ) -> Result<axum::response::Response, reject::Rejection> {
-        tracing::info!("hit image buffer endpoint {:?}", request);
+        tracing::info!("handling image get request: {:?}", request);
 
-        let state = shared_state.lock().await;
-
-        let image = state.image_kvs
-            .get(&request.image_key)
-            .context("failed to get image")
-            .map_err(reject::Rejection)?;
+        let image = state.get_image(request.image_id).await.map_err(reject::Rejection)?;
 
         let response = axum::response::Response::builder()
             .status(200)
@@ -233,120 +320,105 @@ mod image_get {
 }
 
 mod image_create {
+    use anyhow::Context as _;
     use crate::{args, reject, state};
-    use anyhow::Context;
 
     pub async fn handle(
         args: args::SharedArgs,
         state: state::SharedState,
         mut request: axum::extract::Multipart,
     ) -> Result<axum::http::StatusCode, reject::Rejection> {
-        tracing::info!("hit image create endpoint {:?}", request);
+        tracing::info!("handling image create request: {:?}", request);
 
-        let mut state = state.lock().await;
-
-        tracing::info!("insert new image");
         let mut image_bytes = None;
         while let Some(field) = request.next_field()
             .await
-            .context("failed to read multipart field")
+            .context("failed to read multipart field.")
             .map_err(reject::Rejection)?
         {
             if field.name() == Some("image") {
                 let data = field.bytes()
                     .await
-                    .context("failed to read multipart data")
+                    .context("failed to read multipart data.")
                     .map_err(reject::Rejection)?;
                 image_bytes = Some(data);
             }
         }
         let image_bytes = image_bytes
-            .context("failed to find to image")
+            .context("failed to find to image.")
             .map_err(reject::Rejection)?;
-        tracing::info!("read image binary (size: {})", image_bytes.len());
-        let image = image::load_from_memory(&image_bytes)
-            .context("failed to load image from http response body")
-            .map_err(reject::Rejection)?;
-        let mut buf = std::io::Cursor::new(vec![]);
-        image
-            .resize_to_fill(args.image_width, args.image_height, image::imageops::CatmullRom)
-            .write_to(&mut buf, image::ImageFormat::WebP)
-            .context("failed to encode into webp from image")
-            .map_err(reject::Rejection)?;
-        let image_bytes = buf.into_inner();
-        tracing::info!("encoded image size {:?} bytes", image_bytes.len());
 
-        let image_key = uuid::Uuid::new_v4();
-        state.image_kvs.insert(image_key, image_bytes);
-        state::state_to_fs(&state, &args.state_filepath)
+        let image_width = args.image_width;
+        let image_height = args.image_height;
+        let image_bytes = tokio::task::spawn_blocking(move || {
+            let image = image::load_from_memory(&image_bytes)?;
+            let mut buf = std::io::Cursor::new(vec![]);
+            image
+                .resize_to_fill(image_width, image_height, image::imageops::CatmullRom)
+                .write_to(&mut buf, image::ImageFormat::WebP)?;
+            Ok::<_, anyhow::Error>(buf.into_inner())
+        })
             .await
+            .context("failed to join blocking task.")
+            .map_err(reject::Rejection)?
+            .context("failed to process image.")
             .map_err(reject::Rejection)?;
+        tracing::info!("successfully registered image: {} bytes", image_bytes.len());
+
+        let image_id = uuid::Uuid::new_v4();
+        state.insert_image(image_id, image_bytes).await.map_err(reject::Rejection)?;
 
         Ok(axum::http::StatusCode::OK)
     }
 }
 
 mod image_modify {
-    use crate::{args, reject, state};
+    use crate::{reject, state};
 
     #[derive(Debug, Clone, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Request {
-        duration_secs: Option<f32>,
-        image_key: Option<uuid::Uuid>,
+        duration_secs: Option<f64>,
+        current_image_id: Option<uuid::Uuid>,
     }
 
     pub async fn handle(
-        args: args::SharedArgs,
         state: state::SharedState,
         request: axum::Json<Request>,
     ) -> Result<axum::http::StatusCode, reject::Rejection> {
-        tracing::info!("hit image modify endpoint {:?}", request);
+        tracing::info!("handling image modify request: {:?}", request);
 
-        let mut state = state.lock().await;
-
-        if let Some(image_key) = request.image_key {
-            tracing::info!("set current image key {:?}", image_key);
-            state.image_key = Some(image_key);
+        if let Some(current_image_id) = request.current_image_id {
+            tracing::info!("set current image id {}", current_image_id);
+            state.set_current_image_id(Some(current_image_id)).await.map_err(reject::Rejection)?;
         }
 
         if let Some(duration) = request.duration_secs {
-            tracing::info!("set duration {:?}", duration);
-            state.duration_secs = duration;
+            tracing::info!("set duration {}", duration);
+            state.set_duration_secs(duration).await.map_err(reject::Rejection)?;
         }
-
-        state::state_to_fs(&state, &args.state_filepath)
-            .await
-            .map_err(reject::Rejection)?;
 
         Ok(axum::http::StatusCode::OK)
     }
 }
 
 mod image_delete {
-    use crate::{args, reject, state};
+    use crate::{reject, state};
 
     #[derive(Debug, Clone, serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Request {
-        image_key: uuid::Uuid,
+        image_id: uuid::Uuid,
     }
 
     pub async fn handle(
-        args: args::SharedArgs,
         state: state::SharedState,
         request: axum::Json<Request>,
     ) -> Result<axum::http::StatusCode, reject::Rejection> {
-        tracing::info!("hit image delete endpoint {:?}", request);
+        tracing::info!("handling image delete request: {:?}", request);
 
-        let mut state = state.lock().await;
-
-        tracing::info!("remove image key {:?}", request.image_key);
-        state.image_kvs.remove(&request.image_key);
-
-        state::state_to_fs(&state, &args.state_filepath)
-            .await
-            .map_err(reject::Rejection)?;
+        state.remove_image(request.image_id).await.map_err(reject::Rejection)?;
+        tracing::info!("successfully deleted image id: {}", request.image_id);
 
         Ok(axum::http::StatusCode::OK)
     }
@@ -365,10 +437,12 @@ mod reject {
 
     impl axum::response::IntoResponse for Rejection {
         fn into_response(self) -> axum::response::Response {
-            let status_code = axum::http::StatusCode::BAD_REQUEST;
+            tracing::error!("error response: {:#}", self.0);
+
+            let status_code = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
             let response = ErrorResponse {
                 status_code: status_code.as_u16(),
-                message: self.0.to_string(),
+                message: "internal server error".to_string(),
             };
             (status_code, axum::Json(response)).into_response()
         }

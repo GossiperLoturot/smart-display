@@ -18,18 +18,18 @@ export const POLLING_INTERVAL = import.meta.env.VITE_POLLING_INTERVAL || 250;
 
 export interface PollingResponse {
   dateTime: string;
-  imageKey: string | undefined;
+  currentImageId: string | undefined;
 }
 
 export interface ImageIndexResponse {
   durationSecs: number;
-  imageKeys: string[];
-  imageKey: string | undefined;
+  imageIds: string[];
+  currentImageId: string | undefined;
 }
 
 export interface ImageModifyRequest {
   durationSecs: number | undefined;
-  imageKey: string | undefined;
+  currentImageId: string | undefined;
 }
 
 export interface ImageCreateRequest {
@@ -37,7 +37,7 @@ export interface ImageCreateRequest {
 }
 
 export interface ImageDeleteRequest {
-  imageKey: string;
+  imageId: string;
 }
 
 export const App = () => {
@@ -100,7 +100,7 @@ export const App = () => {
     await refetch();
   };
 
-  const imageKeyState = () => polling()?.imageKey;
+  const currentImageIdState = () => polling()?.currentImageId;
   const dateTimeState = () => {
     const pollingValue = polling();
     if (pollingValue?.dateTime) {
@@ -121,8 +121,8 @@ export const App = () => {
   return (
     <div class="w-screen h-screen flex">
       <div class="m-auto relative" style={containerStyle}>
-        <Show when={imageKeyState()}>
-          {(imageKey) => <Background imageKey={imageKey()} />}
+        <Show when={currentImageIdState()}>
+          {(currentImageId) => <Background imageId={currentImageId()} />}
         </Show>
         <Show when={dateTimeState()}>
           {(dateTime) => <DateTime dateTime={dateTime().dateTime} />}

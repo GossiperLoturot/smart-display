@@ -10,15 +10,15 @@ import {
 } from "./app";
 
 export interface BackgroundProps {
-  imageKey: string;
+  imageId: string;
 }
 
 export const Background = (props: BackgroundProps) => {
-  const imageKey = createMemo(() => props.imageKey);
+  const imageId = createMemo(() => props.imageId);
 
   return (
     <img
-      src={`${API_URL}/image-get?imageKey=${imageKey()}`}
+      src={`${API_URL}/image-get?imageId=${imageId()}`}
       alt="background"
       class="absolute inset-0 object-cover brightness-75"
     />
@@ -93,18 +93,21 @@ export const Menu = (props: MenuProps) => {
   const [uploadFile, setUploadFile] = createSignal<File | null>(null);
   const [timer, setTimer] = createSignal("");
 
+  let fileInputRef: HTMLInputElement | undefined;
+
   const onCreate = () => {
     const file = uploadFile();
     if (file) {
       props.onCreate({ image: file }).then(() => {
         setUploadFile(null);
+        if (fileInputRef) fileInputRef.value = "";
       });
     }
   };
 
   const onModifyTimer = () => {
     const durationSecs = Number.parseFloat(timer());
-    return props.onModify({ imageKey: undefined, durationSecs });
+    return props.onModify({ currentImageId: undefined, durationSecs });
   };
 
   return (
@@ -126,6 +129,7 @@ export const Menu = (props: MenuProps) => {
                 const file = event.currentTarget.files?.[0];
                 if (file) setUploadFile(file);
               }}
+              ref={fileInputRef}
             />
             <button
               type="button"
@@ -169,10 +173,10 @@ export const Menu = (props: MenuProps) => {
         {/* Image list */}
         <div class="flex-grow overflow-auto">
           <div class="flex flex-col gap-[16px] p-[16px]">
-            <For each={props.imageIndex.imageKeys}>
-              {(imageKey) => (
+            <For each={props.imageIndex.imageIds}>
+              {(imageId) => (
                 <MenuItem
-                  imageKey={imageKey}
+                  imageId={imageId}
                   onModify={props.onModify}
                   onDelete={props.onDelete}
                 />
@@ -186,46 +190,33 @@ export const Menu = (props: MenuProps) => {
 };
 
 export interface MenuItemProps {
-  imageKey: string;
+  imageId: string;
   onModify: (request: ImageModifyRequest) => Promise<void>;
   onDelete: (request: ImageDeleteRequest) => Promise<void>;
 }
 
 const MenuItem = (props: MenuItemProps) => {
-  const imageKey = createMemo(() => props.imageKey);
-
-  const onCopy = () => {
-    navigator.clipboard.writeText(imageKey());
-  };
+  const imageId = createMemo(() => props.imageId);
 
   const onModifyImage = () => {
-    props.onModify({ imageKey: imageKey(), durationSecs: undefined });
+    props.onModify({ currentImageId: imageId(), durationSecs: undefined });
   };
 
   const onDelete = () => {
-    props.onDelete({ imageKey: imageKey() });
+    props.onDelete({ imageId: imageId() });
   };
 
   return (
     <div
       class="p-[8px] h-[64px] mx-auto flex rounded-[8px] relative z-[10]"
       style={{
-        "background-image": `url(${API_URL}/image-get?imageKey=${imageKey()})`,
+        "background-image": `url(${API_URL}/image-get?imageId=${imageId()})`,
       }}
     >
       <div class="absolute inset-0 bg-[rgba(0,0,0,0.25)] z-[-1] rounded-[8px]" />
       <div class="text-white flex items-center gap-[8px] px-[8px] py-[4px] mt-auto">
         {/* URL text line */}
-        <div class="w-[500px] truncate">{imageKey()}</div>
-
-        {/* Copy */}
-        <button
-          type="button"
-          class="active:scale-125 transition"
-          onClick={onCopy}
-        >
-          <Icons.Copy size={16} />
-        </button>
+        <div class="w-[500px] truncate">{imageId()}</div>
 
         {/* Apply */}
         <button
