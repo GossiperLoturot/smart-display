@@ -11,14 +11,14 @@ This application displays information like date and time.
 
 1. Clone this repository.
 ```sh
-git clone https://github.com/GossiperLoturot/smart-display
+git clone https://github.com/GossiperLoturot/smart-display.git
 ```
 
 2. Build the web page.
 ```sh
 cd ./site
-bun install
-bun run build
+pnpm install
+pnpm run build
 
 # With environment variables
 VITE_POLLING_INTERVAL=250 bun run build
@@ -27,16 +27,13 @@ VITE_POLLING_INTERVAL=250 bun run build
 3. Launch the server.
 ```sh
 cargo run --release
-
-# With extra data file
-cargo run --release -- --state-filepath /path/to/state.json
 ```
 
 ### Server Command Options
 
 |Command Options|Description|Default|
 |--|--|--|
-|state-filepath|persistent data file path|./state.json|
+|database-url|The sqlite database url|sqlite:state.json|
 |address|The address and port that the server is listening on|0.0.0.0:50822|
 |html|The web page served by the server|./html|
 |image-width|Image width when saving image to buffer|780|
